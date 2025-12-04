@@ -18,7 +18,7 @@ func main() {
 	logger.Info("Godis server starting...")
 
 	// 3. 启动 TCP 服务器
-	srv := server.NewKVServer(cfg)
+	srv := server.NewServer(cfg)
 	go srv.Start()
 
 	// 4. 优雅退出 (监听 Ctrl+C)
