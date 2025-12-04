@@ -1,0 +1,25 @@
+# --- Go 编译产物 ---
+# 二进制文件
+godis
+main
+*.exe
+*.test
+*.prof
+
+# --- 依赖目录 (如果不使用 Go Modules vendor 模式，通常忽略) ---
+vendor/
+
+# --- IDE/编辑器配置 ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- 操作系统文件 ---
+.DS_Store
+Thumbs.db
+
+# --- 日志/临时文件 ---
+*.log
+tmp/
