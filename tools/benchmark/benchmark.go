@@ -9,28 +9,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"godis/pkg/protocol"
 )
 
 var (
 	successCount int64
 	failCount    int64
 )
-
-// encodeRESP 将普通命令转换为 RESP 协议格式字符串
-func encodeRESP(command string) string {
-	parts := strings.Fields(command)
-	if len(parts) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	// 写入数组头 *<参数个数>\r\n
-	sb.WriteString(fmt.Sprintf("*%d\r\n", len(parts)))
-	// 写入每个参数 $<长度>\r\n<内容>\r\n
-	for _, part := range parts {
-		sb.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(part), part))
-	}
-	return sb.String()
-}
 
 func worker(id int, address string, requests int, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -50,7 +35,7 @@ func worker(id int, address string, requests int, wg *sync.WaitGroup) {
 	key := fmt.Sprintf("key_%d", id)
 	value := fmt.Sprintf("value_%d", id)
 	command := fmt.Sprintf("SET %s %s", key, value)
-	respCmd := []byte(encodeRESP(command))
+	respCmd := []byte(protocol.EncodeCmd(command))
 
 	for i := 0; i < requests; i++ {
 		// 1. 发送请求

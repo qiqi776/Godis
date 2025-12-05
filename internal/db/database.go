@@ -70,7 +70,7 @@ func (db *Database) get(args []protocol.Value) protocol.Value {
 	db.mu.RUnlock()
 
 	if !ok {
-		return protocol.Value{Type: protocol.BulkString, Bulk: nil} // (nil)
+		return protocol.Value{Type: protocol.BulkString, Bulk: nil}
 	}
 
 	return protocol.Value{Type: protocol.BulkString, Bulk: []byte(val)}

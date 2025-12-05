@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"godis/pkg/protocol"
 	"net"
 	"strings"
 	"time"
@@ -11,23 +12,6 @@ import (
 const (
 	address = "127.0.0.1:6378"
 )
-
-// encodeRESP 将普通命令转换为 RESP 协议格式字符串
-// 例如: "SET name alice" -> "*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$5\r\nalice\r\n"
-func encodeRESP(command string) string {
-	parts := strings.Fields(command)
-	if len(parts) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	// 写入数组头 *<参数个数>\r\n
-	sb.WriteString(fmt.Sprintf("*%d\r\n", len(parts)))
-	// 写入每个参数 $<长度>\r\n<内容>\r\n
-	for _, part := range parts {
-		sb.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(part), part))
-	}
-	return sb.String()
-}
 
 func runTestCase(testName, command, expectedResponse string) bool {
 	fmt.Printf("Running test: %s...\n", testName)
@@ -43,7 +27,7 @@ func runTestCase(testName, command, expectedResponse string) bool {
 	conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	// 1. 发送 RESP 格式的命令
-	respCmd := encodeRESP(command)
+	respCmd := protocol.EncodeCmd(command)
 	_, err = conn.Write([]byte(respCmd))
 	if err != nil {
 		fmt.Printf("  [FAIL] Write error: %v\n", err)
@@ -87,12 +71,24 @@ func main() {
 	
 	// 注意：预期结果必须是严格的 RESP 格式
 	results := []bool{
+		// 基础功能
 		runTestCase("Set name",      "SET name alice", "+OK\r\n"),
 		runTestCase("Get name",      "GET name",       "$5\r\nalice\r\n"),
-		runTestCase("Set age",       "SET age 30",     "+OK\r\n"),
-		runTestCase("Get age",       "GET age",        "$2\r\n30\r\n"),
-		runTestCase("Get non-exist", "GET noname",     "$-1\r\n"),
-		runTestCase("Ping",          "PING",           "+PONG\r\n"),
+		
+		// 对应 C++ 新增的边界测试
+		// 1. 大小写不敏感测试
+		runTestCase("Case Insensitive SET", "sEt name bob", "+OK\r\n"),
+		runTestCase("Case Insensitive GET", "get name",     "$3\r\nbob\r\n"),
+		
+		// 2. 覆盖测试
+		runTestCase("Overwrite value", "SET name charlie", "+OK\r\n"),
+		runTestCase("Get overwritten", "GET name",         "$7\r\ncharlie\r\n"),
+
+		// 3. 错误处理测试 (确保 Server 端返回标准的 Redis 错误前缀)
+		// 注意：你需要确保 internal/db/database.go 中的错误信息与这里匹配
+		runTestCase("GET wrong args", "GET",           "-ERR wrong number of arguments for 'get' command\r\n"),
+		runTestCase("SET wrong args", "SET k",         "-ERR wrong number of arguments for 'set' command\r\n"),
+		runTestCase("Unknown Cmd",    "UNKNOWN_CMD k", "-ERR unknown command 'UNKNOWN_CMD'\r\n"),
 	}
 
 	failedCount := 0
