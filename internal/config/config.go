@@ -7,15 +7,19 @@ import (
 )
 
 type Config struct {
-	Port     string
-	LogLevel string
-	LogFile  string
+	Port       string
+	LogLevel   string
+	LogFile    string
+	AppendOnly bool
+	AppendFile string
 }
 
 func Load(path string) *Config {
 	cfg := &Config{
 		Port:     "6378",
 		LogLevel: "info",
+		AppendOnly: false,			  // 默认关闭
+		AppendFile: "appendonly.aof", // 默认文件名
 	}
 	if path == "" {
 		return cfg
@@ -45,6 +49,10 @@ func Load(path string) *Config {
 				cfg.LogLevel = val
 			case "logfile":
 				cfg.LogFile = val
+			case "appendonly":
+				cfg.AppendOnly = (val == "yes")
+			case "appendfilename":
+				cfg.AppendFile = strings.Trim(val, "\"")
 			}
 		}
 	}

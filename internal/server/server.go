@@ -14,10 +14,10 @@ type Server struct {
 	db     *db.Database
 }
 
-func NewServer(cfg *config.Config) *Server {
+func NewServer(cfg *config.Config, database *db.Database) *Server {
 	return &Server{
 		config: cfg,
-		db:     db.NewDatabase(),
+		db:     database,
 	}
 }
 
