@@ -1,24 +1,25 @@
-package server
+package tcp
 
 import (
+	"godis/internal/commands"
 	"godis/internal/config"
-	"godis/internal/db"
+	"godis/internal/core"
 	"godis/pkg/logger"
 	"godis/pkg/protocol"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 )
-
 type Server struct {
 	config *config.Config
-	db     *db.Database
+	db      core.KVStorage
 }
 
-func NewServer(cfg *config.Config, database *db.Database) *Server {
+func NewServer(cfg *config.Config, db core.KVStorage) *Server {
 	return &Server{
 		config: cfg,
-		db:     database,
+		db:     db,
 	}
 }
 
@@ -42,11 +43,11 @@ func (s *Server) Start() {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
-	atomic.AddInt64(&s.db.Stats.ConnectedClients, 1)
+	atomic.AddInt64(&s.db.GetStats().ConnectedClients, 1)
 	defer func() {
 		conn.Close()
-		// [新增] 连接断开，计数 -1
-		atomic.AddInt64(&s.db.Stats.ConnectedClients, -1)
+		// 连接断开，计数 -1
+		atomic.AddInt64(&s.db.GetStats().ConnectedClients, -1)
 	}()
 
 	defer conn.Close()
@@ -65,14 +66,26 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		// 执行逻辑
-		result := s.db.Exec(payload)
+		if payload.Type != protocol.Array || len(payload.Array) == 0 {
+			continue
+		}
 
+		// 提取命令
+		cmdName := strings.ToUpper(string(payload.Array[0].Bulk))
+		args := payload.Array[1:]
+		
+		atomic.AddInt64(&s.db.GetStats().TotalCommandsProcessed, 1)
+
+		ctx := &core.Context{
+			Args: args,
+			DB:   s.db,
+		}
+
+		result := commands.Execute(cmdName, ctx)
 		// 发送响应
-		err = writer.Write(result)
-		if err != nil {
-			logger.Error("Write error: %v", err)
-			break
+		if err := writer.Write(result); err != nil {
+			logger.Error("Write response error: %v", err)
+			return
 		}
 	}
 }
