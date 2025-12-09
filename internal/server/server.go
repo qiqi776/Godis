@@ -7,6 +7,7 @@ import (
 	"godis/pkg/protocol"
 	"io"
 	"net"
+	"sync/atomic"
 )
 
 type Server struct {
@@ -28,6 +29,7 @@ func (s *Server) Start() {
 		logger.Fatal("Failed to listen: %v", err)
 	}
 	logger.Info("Godis listening on %s", addr)
+	logger.Info("AOF enabled: %v, Strategy: %s", s.config.AppendOnly, s.config.AppendFsync)
 
 	for {
 		conn, err := listener.Accept()
@@ -40,6 +42,13 @@ func (s *Server) Start() {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
+	atomic.AddInt64(&s.db.Stats.ConnectedClients, 1)
+	defer func() {
+		conn.Close()
+		// [新增] 连接断开，计数 -1
+		atomic.AddInt64(&s.db.Stats.ConnectedClients, -1)
+	}()
+
 	defer conn.Close()
 
 	reader := protocol.NewReader(conn)
@@ -50,10 +59,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 		payload, err := reader.ReadValue()
 		
 		if err != nil {
-			if err == io.EOF {
-				break // 客户端关闭连接
+			if err != io.EOF {
+				logger.Error("Parse error: %v", err)
 			}
-			logger.Error("Parse error: %v", err)
 			return
 		}
 

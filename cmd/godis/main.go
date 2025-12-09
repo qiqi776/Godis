@@ -27,7 +27,7 @@ func main() {
 	var aofEngine *aof.Aof
 	var err error
 	if cfg.AppendOnly {
-		aofEngine, err = aof.NewAof(cfg.AppendFile)
+		aofEngine, err = aof.NewAof(cfg.AppendFile, cfg.AppendFsync)
 		if err != nil {
 			logger.Fatal("Failed to open AOF file: %v", err)
 		}
