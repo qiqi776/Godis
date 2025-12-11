@@ -24,9 +24,13 @@ func Lookup(name string) (core.CommandFunc, bool) {
 func Init() {
 	Register("SET", Set)
 	Register("GET", Get)
-
 	Register("PING", Ping)
 	Register("INFO", Info)
+    Register("EXPIRE", Expire)
+    Register("PEXPIRE", PExpire)
+    Register("TTL", TTL)
+    Register("PTTL", PTTL)
+    Register("PERSIST", Persist)
 }
 
 // 统一的执行入口

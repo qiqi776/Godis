@@ -23,8 +23,8 @@ func Set(ctx *core.Context) protocol.Value {
 			Type: protocol.Array,
 			Array: []protocol.Value{
 				{Type: protocol.BulkString, Bulk: []byte("SET")},
-				ctx.Args[0], // Key
-				ctx.Args[1], // Val
+				ctx.Args[0],
+				ctx.Args[1],
 			},
 		}
 		// 调用底部的辅助函数

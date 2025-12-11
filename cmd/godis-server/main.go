@@ -29,6 +29,7 @@ func main() {
 	// 3. 初始化命令层和数据库
 	commands.Init()
 	db := database.NewStandalone()
+	db.StartCleanTask()
 
 	// 5. AOF处理
 	if cfg.AppendOnly {
@@ -37,16 +38,12 @@ func main() {
 			logger.Fatal("Failed to open AOF file: %v", err)
 		}
 		defer aofEngine.Close()
-		// 注入 AOF 到数据库
 		db.SetAof(aofEngine)
-		// AOF 数据恢复
 		logger.Info("Loading data from AOF...")
 		aofEngine.Read(func(cmd protocol.Value) {
 			if cmd.Type == protocol.Array && len(cmd.Array) > 0 {
 				cmdName := strings.ToUpper(string(cmd.Array[0].Bulk))
 				args := cmd.Array[1:]
-				
-				// 构造上下文执行命令
 				ctx := &core.Context{
 					Args: args,
 					DB:   db,
@@ -58,7 +55,6 @@ func main() {
 	}
 
 	// 6. 启动 TCP 服务器
-	// 依赖注入: 将 config 和 db 注入到 server 中
 	server := tcp.NewServer(cfg, db)
 	go server.Start()
 

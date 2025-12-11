@@ -4,6 +4,7 @@ import (
 	"godis/internal/aof"
 	"godis/internal/database"
 	"godis/pkg/protocol"
+	"time"
 )
 
 // 命令执行时的上下文
@@ -20,6 +21,11 @@ type KVStorage interface {
 	// 基础读写
 	Get(key string) ([]byte, bool)
 	Set(key string, value []byte)
+
+	// TTL接口
+	SetExpiration(key string, ddl time.Time) (bool, error)
+	RmExpiration(key string) (bool, error)
+	GetTTL(key string) (time.Duration, bool, error)
 	
 	// 统计相关
 	GetStats() *database.Stats
