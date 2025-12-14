@@ -23,12 +23,12 @@ func Set(ctx *core.Context) protocol.Value {
 			Type: protocol.Array,
 			Array: []protocol.Value{
 				{Type: protocol.BulkString, Bulk: []byte("SET")},
-				ctx.Args[0], // Key
-				ctx.Args[1], // Val
+				ctx.Args[0],
+				ctx.Args[1],
 			},
 		}
-		// 调用底部的辅助函数
-		payload := toRespBytes(cmdLine) 
+
+		payload := ToRespBytes(cmdLine) 
 		aofEngine.Write(payload)
 	}
 
@@ -50,8 +50,7 @@ func Get(ctx *core.Context) protocol.Value {
 	return protocol.Value{Type: protocol.BulkString, Bulk: val}
 }
 
-// 辅助函数
-func toRespBytes(v protocol.Value) []byte {
+func ToRespBytes(v protocol.Value) []byte {
 	var sb strings.Builder
 	sb.WriteString(protocol.MakeArrayHeader(len(v.Array)))
 	for _, item := range v.Array {

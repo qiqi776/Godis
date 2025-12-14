@@ -6,10 +6,9 @@ import (
 	"strings"
 )
 
-// 是全局命令注册表
+// 全局命令注册表
 var Commands = make(map[string]core.CommandFunc)
 
-// 注册一个新命令
 func Register(name string, cmd core.CommandFunc) {
 	Commands[strings.ToUpper(name)] = cmd
 }
@@ -20,16 +19,18 @@ func Lookup(name string) (core.CommandFunc, bool) {
 	return cmd, ok
 }
 
-// 初始化所有命令
 func Init() {
 	Register("SET", Set)
 	Register("GET", Get)
-
 	Register("PING", Ping)
 	Register("INFO", Info)
+    Register("EXPIRE", Expire)
+    Register("PEXPIRE", PExpire)
+    Register("TTL", TTL)
+    Register("PTTL", PTTL)
+    Register("PERSIST", Persist)
 }
 
-// 统一的执行入口
 func Execute(name string, ctx *core.Context) protocol.Value {
 	cmd, ok := Lookup(name)
 	if !ok {
