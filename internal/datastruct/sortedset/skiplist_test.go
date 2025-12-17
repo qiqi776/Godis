@@ -59,7 +59,7 @@ func TestSkiplist_RemoveRangeByRank(t *testing.T) {
 	sl.insert("c", 3.0)
 
 	// 删除指定排名范围内的元素
-	removed := sl.RemoveRangeByRank(0, 2)
+	removed := sl.RemoveRangeByRank(0, 1) 
 
 	// 验证删除后的结果
 	assert.Len(t, removed, 2) // 移除了前两个元素 a 和 b
@@ -99,7 +99,7 @@ func TestSkiplist_GetFirstInRange(t *testing.T) {
 	// 获取范围内第一个元素
 	node := sl.getFirstInRange(&ScoreBorder{Value: 1.5, Exclude: true}, &ScoreBorder{Value: 3.5, Exclude: true})
 	assert.NotNil(t, node)
-	assert.Equal(t, node.Member, "c")
+	assert.Equal(t, node.Member, "b")
 }
 
 func TestSkiplist_GetLastInRange(t *testing.T) {
@@ -114,7 +114,7 @@ func TestSkiplist_GetLastInRange(t *testing.T) {
 	// 获取范围内最后一个元素
 	node := sl.getLastInRange(&ScoreBorder{Value: 1.5, Exclude: true}, &ScoreBorder{Value: 3.5, Exclude: true})
 	assert.NotNil(t, node)
-	assert.Equal(t, node.Member, "b")
+	assert.Equal(t, node.Member, "c")
 }
 
 func TestSkiplist_GetRank(t *testing.T) {

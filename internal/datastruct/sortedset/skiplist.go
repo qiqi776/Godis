@@ -3,6 +3,7 @@ package sortedset
 import (
 	"math/bits"
 	"math/rand"
+	"time"
 )
 
 const (
@@ -48,6 +49,10 @@ func makeskiplist() *skiplist {
 		length: 0,
 		header: makenode(maxLevel, 0, ""),
 	}
+}
+
+func init() {
+    rand.Seed(time.Now().UnixNano())
 }
 
 func randomLevel() int {
@@ -313,7 +318,7 @@ func (sl *skiplist) RemoveRangeByRank(start int64, stop int64) (removed []*Eleme
 	}
 
 	node = node.level[0].forward
-	for node != nil && i < stop {
+	for node != nil && i <= stop {
 		next := node.level[0].forward
 		removedElement := node.Element
 		removed = append(removed, &removedElement)

@@ -92,6 +92,9 @@ func ParseScoreBorder(s string) (Border, error) {
 	if s == "-inf" {
 		return scoreNegativeInfBorder, nil
 	}
+	if len(s) == 0 {
+        return nil, errors.New("ERR empty string")
+    }
     if s[0] == '(' {
 		value, err := strconv.ParseFloat(s[1:], 64)
 		if err != nil {
