@@ -25,8 +25,8 @@ type node struct {
 
 type skiplist struct {
 	header, tail *node
-	length       int64
-	level        int
+	length        int64
+	level         int
 }
 
 func makenode(level int, score float64, member string) *node {
@@ -84,27 +84,6 @@ func (sl *skiplist) insert(member string, score float64) *node {
 		update[i] = node
 	}
 
-	// 检查Member是否已存在
-	nextNode := node.level[0].forward
-	if nextNode != nil && nextNode.Member == member {
-		sl.removeNode(nextNode, update)
-		node = sl.header
-		for i := sl.level - 1; i >= 0; i-- {
-			if i == sl.level-1 {
-				rank[i] = 0
-			} else {
-				rank[i] = rank[i+1]
-			}
-			for node.level[i].forward != nil && (node.level[i].forward.Score < score ||
-				(node.level[i].forward.Score == score && node.level[i].forward.Member < member)) {
-				rank[i] += node.level[i].span
-				node = node.level[i].forward
-			}
-			update[i] = node
-		}
-	}
-
-	// 生成新层高
 	level := randomLevel()
 	if level > sl.level {
 		for i := sl.level; i < level; i++ {
