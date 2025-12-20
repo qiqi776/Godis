@@ -22,9 +22,9 @@ func Make() *BitMap {
 // toByteSize 计算对应的字节数
 func toByteSize(bitSize int64) int64 {
 	if bitSize%8 == 0 {
-		return bitSize / 8
+		return bitSize >> 3
 	}
-	return bitSize/8 + 1
+	return (bitSize>>3) + 1
 }
 
 // grow 扩容机制
@@ -57,75 +57,99 @@ func (b *BitMap) ToBytes() []byte {
 
 // SetBit 设置指定 offset 的值
 func (b *BitMap) SetBit(offset int64, val byte) {
-	Index := offset >> 3
+	index := offset >> 3
 	bit := offset & 7
 	b.grow(offset + 1)
 	mask := byte(1 << bit)
 	if val > 0 {
-		(*b)[Index] |= mask
+		(*b)[index] |= mask
 	} else {
-		(*b)[Index] &^= mask
+		(*b)[index] &^= mask
 	}
 }
 
 // GetBit 读取指定 offset 的值
 func (b *BitMap) GetBit(offset int64) byte {
-	Index := offset >> 3
+	index := offset >> 3
 	bit := offset & 7
-	if Index >= int64(len(*b)) {
+	if index >= int64(len(*b)) {
 		return 0
 	}
-	return ((*b)[Index] >> bit) & 0x01
+	return ((*b)[index] >> bit) & 0x01
 }
 
 // ForEachBit 完整遍历指定范围内的每一位
 func (b *BitMap) ForEachBit(begin int64, end int64, cb BitCallback) {
-	length := int64(len(*b))
-	startByte := begin >> 3
-	for i := startByte; i < length; i++ {
-		byteVal := (*b)[i]
-		baseOffset := i << 3
-		for j := 0; j < 8; j++ {
-			curOffset := baseOffset + int64(j)
-			if curOffset < begin {
-				continue
-			}
-			if end > 0 && curOffset >= end {
-				return
-			}
-			val := (byteVal >> j) & 0x01
-			if !cb(curOffset, val) {
-				return
-			}
-		}
-	}
+    length := int64(len(*b))
+    startByte := begin >> 3
+    if end == 0 {
+        end = length << 3
+    }
+    endByte := (end - 1) >> 3
+    for i := startByte; i < length; i++ {
+        if i > endByte {
+            return
+        }
+        byteVal := (*b)[i]
+        baseOffset := i << 3
+        startBit, endBit := 0, 8
+        if i == startByte {
+            startBit = int(begin & 7)
+        }
+        if i == endByte {
+            remain := end & 7
+            endBit = int(remain)
+            if endBit == 0 { 
+               endBit = 8
+            }
+        }
+        for j := startBit; j < endBit; j++ {
+            val := (byteVal >> j) & 0x01
+            curOffset := baseOffset + int64(j)
+            if !cb(curOffset, val) {
+                return
+            }
+        }
+    }
 }
 
 // ForEachSetBit 仅遍历值为 1 的位，利用 CPU 指令跳过 0 位，适合稀疏数据
 func (b *BitMap) ForEachSetBit(begin int64, end int64, cb SetBitCallback) {
 	length := int64(len(*b))
+	if length == 0 {
+		return
+	}
 	startByte := begin >> 3
+	if end == 0 {
+		end = length << 3
+	}
+	endByte := (end-1) >> 3
 	for i := startByte; i < length; i++ {
-		byteVal := (*b)[i]
-		if byteVal == 0 {
-			continue
-		}
-		baseOffset := i << 3
-		for byteVal != 0 {
-			tz := bits.TrailingZeros8(byteVal)
-			curOffset := baseOffset + int64(tz)
-			bitMask := byte(1 << tz)
-			byteVal &^= bitMask 
-			if curOffset < begin {
-				continue
-			}
-			if end > 0 && curOffset >= end {
-				return
-			}
-			if !cb(curOffset) {
-				return
-			}
-		}
+        if i > endByte {
+            return 
+        }
+        byteVal := (*b)[i]
+        if i == startByte {
+            byteVal &= (0xFF << (begin & 7))
+        }
+        if i == endByte {
+            remain := end & 7
+            if remain != 0 {
+                byteVal &= (1 << remain) - 1
+            }
+        }
+        if byteVal == 0 {
+            continue
+        }
+        baseOffset := i << 3
+        for byteVal != 0 {
+            tz := bits.TrailingZeros8(byteVal)
+            curOffset := baseOffset + int64(tz)
+            if !cb(curOffset) {
+                return
+            }
+            byteVal &= byteVal - 1 
+        }
 	}
 }
 
