@@ -2,8 +2,7 @@ package sortedset
 
 import (
 	"strconv"
-
-	"github.com/hdt3213/godis/lib/wildcard"
+	"godis/pkg/wildcard"
 )
 
 type SortedSet struct {

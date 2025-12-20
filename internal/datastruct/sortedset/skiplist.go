@@ -2,8 +2,7 @@ package sortedset
 
 import (
 	"math/bits"
-	"math/rand"
-	"time"
+	"math/rand/v2"
 )
 
 const (
@@ -51,9 +50,6 @@ func makeskiplist() *skiplist {
 	}
 }
 
-func init() {
-    rand.Seed(time.Now().UnixNano())
-}
 
 func randomLevel() int {
 	rd := rand.Uint64()
