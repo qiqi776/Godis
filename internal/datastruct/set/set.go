@@ -20,6 +20,17 @@ func Make(members ...string) *Set {
 	return set
 }
 
+// MakeConcurrentSafe 创建并发安全的 Set，基于字典实现，无重复
+func MakeConcurrentSafe(members ...string) *Set {
+	set := &Set{
+		dict: dict.MakeConcurrent(1),
+	}
+	for _, member := range members {
+		set.Add(member)
+	}
+	return set
+}
+
 // Add 向集合中加入一个元素
 func (set *Set) Add(val string) int {
 	return set.dict.Put(val, nil)
