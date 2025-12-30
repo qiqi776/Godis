@@ -1,4 +1,4 @@
-package database
+package core
 
 import (
 	"fmt"
@@ -26,7 +26,6 @@ func NewStats() *Stats {
 func (s *Stats) GetInfo(keyCount int) string {
 	uptime := int64(time.Since(s.startTime).Seconds())
 	
-	// 使用 string builder 拼接（简化版）
 	info := "# Server\r\n"
 	info += "godis_version:0.0.1\r\n"
 	info += fmt.Sprintf("uptime_in_seconds:%d\r\n", uptime)

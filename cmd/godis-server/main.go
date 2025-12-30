@@ -31,15 +31,16 @@ func main() {
 	db := database.NewStandalone()
 	db.StartCleanTask()
 
-	// 5. AOF处理
+	// 4. AOF处理
 	if cfg.AppendOnly {
 		aofEngine, err := aof.NewAof(cfg.AppendFile, cfg.AppendFsync)
 		if err != nil {
 			logger.Fatal("Failed to open AOF file: %v", err)
 		}
-		defer aofEngine.Close()
 		db.SetAof(aofEngine)
 		logger.Info("Loading data from AOF...")
+		fakeConn := core.NewConnection()
+
 		aofEngine.Read(func(cmd protocol.Value) {
 			if cmd.Type == protocol.Array && len(cmd.Array) > 0 {
 				cmdName := strings.ToUpper(string(cmd.Array[0].Bulk))
@@ -47,6 +48,7 @@ func main() {
 				ctx := &core.Context{
 					Args: args,
 					DB:   db,
+					Conn: fakeConn,
 				}
 				commands.Execute(cmdName, ctx)
 			}
@@ -54,14 +56,18 @@ func main() {
 		logger.Info("AOF loaded.")
 	}
 
-	// 6. 启动 TCP 服务器
+	// 5. 启动 TCP 服务器
 	server := tcp.NewServer(cfg, db)
 	go server.Start()
 
-	// 7. 优雅退出
+	// 6. 优雅退出
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	logger.Info("Godis server shutting down...")
+	server.Stop()
+	db.Close()
+
+	logger.Info("Godis server exited properly.")
 }

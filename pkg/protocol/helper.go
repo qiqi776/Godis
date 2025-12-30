@@ -33,3 +33,13 @@ func EncodeCmd(command string) string {
 	}
 	return sb.String()
 }
+
+// ToRespBytes 将 protocol.Value 转换回 RESP 字节流
+func ToRespBytes(v Value) []byte {
+	var sb strings.Builder
+	sb.WriteString(MakeArrayHeader(len(v.Array)))
+	for _, item := range v.Array {
+		sb.WriteString(MakeBulkString(string(item.Bulk)))
+	}
+	return []byte(sb.String())
+}

@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"errors"
 	"godis/internal/commands"
 	"godis/internal/config"
 	"godis/internal/core"
@@ -14,6 +15,7 @@ import (
 type Server struct {
 	config *config.Config
 	db      core.KVStorage
+	listener net.Listener
 }
 
 func NewServer(cfg *config.Config, db core.KVStorage) *Server {
@@ -35,6 +37,9 @@ func (s *Server) Start() {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			logger.Error("Accept error: %v", err)
 			continue
 		}
@@ -42,23 +47,28 @@ func (s *Server) Start() {
 	}
 }
 
+// Stop 关闭监听器
+func (s *Server) Stop() {
+	if s.listener != nil {
+		s.listener.Close()
+	}
+}
+
+// handleConnection 处理每个客户端连接
 func (s *Server) handleConnection(conn net.Conn) {
 	atomic.AddInt64(&s.db.GetStats().ConnectedClients, 1)
 	defer func() {
 		conn.Close()
-		// 连接断开，计数 -1
 		atomic.AddInt64(&s.db.GetStats().ConnectedClients, -1)
 	}()
 
-	defer conn.Close()
+	clientConn := core.NewConnection()
 
 	reader := protocol.NewReader(conn)
 	writer := protocol.NewWriter(conn)
 
 	for {
-		// 读取解析,ReadValue 会阻塞直到读到一个完整的RESP报文，从而解决粘包问题
 		payload, err := reader.ReadValue()
-		
 		if err != nil {
 			if err != io.EOF {
 				logger.Error("Parse error: %v", err)
@@ -70,26 +80,21 @@ func (s *Server) handleConnection(conn net.Conn) {
 			continue
 		}
 
-		// 提取命令
 		cmdName := strings.ToUpper(string(payload.Array[0].Bulk))
 		args := payload.Array[1:]
-		
+
 		atomic.AddInt64(&s.db.GetStats().TotalCommandsProcessed, 1)
 
 		ctx := &core.Context{
 			Args: args,
 			DB:   s.db,
+			Conn: clientConn,
 		}
 
 		result := commands.Execute(cmdName, ctx)
-		// 发送响应
 		if err := writer.Write(result); err != nil {
 			logger.Error("Write response error: %v", err)
 			return
 		}
 	}
-}
-
-func (s *Server) Stop() {
-	// 实现优雅关闭逻辑
 }
