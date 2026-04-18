@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestDBSetGetDelExists(t *testing.T) {
+func TestKV(t *testing.T) {
 	t.Parallel()
 
 	eng := New(1)
@@ -40,7 +40,7 @@ func TestDBSetGetDelExists(t *testing.T) {
 	}
 }
 
-func TestDBGetReturnsCopy(t *testing.T) {
+func TestCopy(t *testing.T) {
 	t.Parallel()
 
 	eng := New(1)
@@ -64,7 +64,7 @@ func TestDBGetReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestDBConcurrentSetAndGet(t *testing.T) {
+func TestConcurrent(t *testing.T) {
 	t.Parallel()
 
 	eng := New(1)
@@ -92,7 +92,7 @@ func TestDBConcurrentSetAndGet(t *testing.T) {
 	wg.Wait()
 }
 
-func TestDBExpireTTLAndPersist(t *testing.T) {
+func TestPersist(t *testing.T) {
 	t.Parallel()
 
 	eng := New(1)
@@ -133,7 +133,7 @@ func TestDBExpireTTLAndPersist(t *testing.T) {
 	}
 }
 
-func TestDBExpireRemovesKeyAfterDeadline(t *testing.T) {
+func TestExpire(t *testing.T) {
 	t.Parallel()
 
 	eng := New(1)

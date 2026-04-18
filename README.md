@@ -11,14 +11,10 @@ Godis 是一个用 Go 从零实现的缓存项目
 - `SET`
 - `DEL`
 - `EXISTS`
+- `EXPIRE`
+- `TTL`
+- `PERSIST`
+- `SELECT`
 - unknown command 错误返回
 - 优雅退出
 - 基础集成测试
-
-## 当前支持的命令
-
-- `PING`
-- `GET`
-- `SET`
-- `DEL`
-- `EXISTS`

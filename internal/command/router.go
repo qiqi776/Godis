@@ -50,6 +50,8 @@ func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
 		return e.execTTL(session, args)
 	case "PERSIST":
 		return e.execPersist(session, args)
+	case "SELECT":
+		return e.execSelect(session, args)
 	default:
 		return resp.Error("ERR unknown command '" + strings.ToLower(name) + "'")
 	}
@@ -180,6 +182,23 @@ func (e *Executor) execPersist(session Session, args [][]byte) []byte {
 		return resp.Integer(1)
 	}
 	return resp.Integer(0)
+}
+
+func (e *Executor) execSelect(session Session, args [][]byte) []byte {
+	if len(args) != 1 {
+		return wrongArity("select")
+	}
+
+	index, err := strconv.Atoi(string(args[0]))
+	if err != nil {
+		return resp.Error("ERR value is not an integer or out of range")
+	}
+	if e.engine.DB(index) == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	session.SetDBIndex(index)
+	return resp.SimpleString("OK")
 }
 
 func wrongArity(command string) []byte {

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestReadCommandArray(t *testing.T) {
+func TestArray(t *testing.T) {
 	t.Parallel()
 
 	reader := bufio.NewReader(strings.NewReader("*1\r\n$4\r\nPING\r\n"))
@@ -25,7 +25,7 @@ func TestReadCommandArray(t *testing.T) {
 	}
 }
 
-func TestReadCommandInline(t *testing.T) {
+func TestInline(t *testing.T) {
 	t.Parallel()
 
 	reader := bufio.NewReader(strings.NewReader("PING hello\r\n"))
@@ -46,7 +46,7 @@ func TestReadCommandInline(t *testing.T) {
 	}
 }
 
-func TestReadCommandProtocolError(t *testing.T) {
+func TestProto(t *testing.T) {
 	t.Parallel()
 
 	reader := bufio.NewReader(strings.NewReader("*x\r\n"))

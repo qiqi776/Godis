@@ -16,7 +16,7 @@ import (
 	"godis/internal/server"
 )
 
-func TestServerPingAndBasicKV(t *testing.T) {
+func TestKV(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Config{
@@ -38,7 +38,7 @@ func TestServerPingAndBasicKV(t *testing.T) {
 		errCh <- srv.Run(ctx)
 	}()
 
-	addr := waitForAddr(t, srv)
+	addr := waitAddr(t, srv)
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -49,26 +49,26 @@ func TestServerPingAndBasicKV(t *testing.T) {
 
 	reader := bufio.NewReader(conn)
 
-	writeRESP(t, conn, "PING")
-	assertReply(t, reader, "+PONG\r\n")
+	writeCmd(t, conn, "PING")
+	wantReply(t, reader, "+PONG\r\n")
 
-	writeRESP(t, conn, "SET", "demo", "42")
-	assertReply(t, reader, "+OK\r\n")
+	writeCmd(t, conn, "SET", "demo", "42")
+	wantReply(t, reader, "+OK\r\n")
 
-	writeRESP(t, conn, "GET", "demo")
-	assertReply(t, reader, "$2\r\n42\r\n")
+	writeCmd(t, conn, "GET", "demo")
+	wantReply(t, reader, "$2\r\n42\r\n")
 
-	writeRESP(t, conn, "EXISTS", "demo")
-	assertReply(t, reader, ":1\r\n")
+	writeCmd(t, conn, "EXISTS", "demo")
+	wantReply(t, reader, ":1\r\n")
 
-	writeRESP(t, conn, "DEL", "demo")
-	assertReply(t, reader, ":1\r\n")
+	writeCmd(t, conn, "DEL", "demo")
+	wantReply(t, reader, ":1\r\n")
 
-	writeRESP(t, conn, "GET", "demo")
-	assertReply(t, reader, "$-1\r\n")
+	writeCmd(t, conn, "GET", "demo")
+	wantReply(t, reader, "$-1\r\n")
 
-	writeRESP(t, conn, "NOPE")
-	assertReply(t, reader, "-ERR unknown command 'nope'\r\n")
+	writeCmd(t, conn, "NOPE")
+	wantReply(t, reader, "-ERR unknown command 'nope'\r\n")
 
 	cancel()
 
@@ -82,7 +82,7 @@ func TestServerPingAndBasicKV(t *testing.T) {
 	}
 }
 
-func TestServerTTLCommands(t *testing.T) {
+func TestTTL(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Config{
@@ -104,7 +104,7 @@ func TestServerTTLCommands(t *testing.T) {
 		errCh <- srv.Run(ctx)
 	}()
 
-	addr := waitForAddr(t, srv)
+	addr := waitAddr(t, srv)
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -115,37 +115,37 @@ func TestServerTTLCommands(t *testing.T) {
 
 	reader := bufio.NewReader(conn)
 
-	writeRESP(t, conn, "SET", "temp", "42")
-	assertReply(t, reader, "+OK\r\n")
+	writeCmd(t, conn, "SET", "temp", "42")
+	wantReply(t, reader, "+OK\r\n")
 
-	writeRESP(t, conn, "TTL", "temp")
-	assertReply(t, reader, ":-1\r\n")
+	writeCmd(t, conn, "TTL", "temp")
+	wantReply(t, reader, ":-1\r\n")
 
-	writeRESP(t, conn, "EXPIRE", "temp", "2")
-	assertReply(t, reader, ":1\r\n")
+	writeCmd(t, conn, "EXPIRE", "temp", "2")
+	wantReply(t, reader, ":1\r\n")
 
-	writeRESP(t, conn, "TTL", "temp")
-	assertIntegerReplyInRange(t, reader, 1, 2)
+	writeCmd(t, conn, "TTL", "temp")
+	wantInt(t, reader, 1, 2)
 
-	writeRESP(t, conn, "PERSIST", "temp")
-	assertReply(t, reader, ":1\r\n")
+	writeCmd(t, conn, "PERSIST", "temp")
+	wantReply(t, reader, ":1\r\n")
 
-	writeRESP(t, conn, "TTL", "temp")
-	assertReply(t, reader, ":-1\r\n")
+	writeCmd(t, conn, "TTL", "temp")
+	wantReply(t, reader, ":-1\r\n")
 
-	writeRESP(t, conn, "EXPIRE", "temp", "1")
-	assertReply(t, reader, ":1\r\n")
+	writeCmd(t, conn, "EXPIRE", "temp", "1")
+	wantReply(t, reader, ":1\r\n")
 
 	time.Sleep(1100 * time.Millisecond)
 
-	writeRESP(t, conn, "GET", "temp")
-	assertReply(t, reader, "$-1\r\n")
+	writeCmd(t, conn, "GET", "temp")
+	wantReply(t, reader, "$-1\r\n")
 
-	writeRESP(t, conn, "TTL", "temp")
-	assertReply(t, reader, ":-2\r\n")
+	writeCmd(t, conn, "TTL", "temp")
+	wantReply(t, reader, ":-2\r\n")
 
-	writeRESP(t, conn, "PERSIST", "missing")
-	assertReply(t, reader, ":0\r\n")
+	writeCmd(t, conn, "PERSIST", "missing")
+	wantReply(t, reader, ":0\r\n")
 
 	cancel()
 
@@ -159,7 +159,79 @@ func TestServerTTLCommands(t *testing.T) {
 	}
 }
 
-func waitForAddr(t *testing.T, srv *server.Server) string {
+func TestSelect(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Host:      "127.0.0.1",
+		Port:      0,
+		LogLevel:  "error",
+		Databases: 4,
+	}
+
+	eng := engine.New(cfg.Databases)
+	t.Cleanup(eng.Close)
+
+	exec := command.NewExecutor(eng)
+	srv := server.New(cfg, logger.NewDiscard(), exec)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Run(ctx)
+	}()
+
+	addr := waitAddr(t, srv)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		cancel()
+		t.Fatalf("dial server: %v", err)
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	writeCmd(t, conn, "SET", "a", "1")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "SELECT", "1")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "GET", "a")
+	wantReply(t, reader, "$-1\r\n")
+
+	writeCmd(t, conn, "SET", "a", "2")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "GET", "a")
+	wantReply(t, reader, "$1\r\n2\r\n")
+
+	writeCmd(t, conn, "SELECT", "0")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "GET", "a")
+	wantReply(t, reader, "$1\r\n1\r\n")
+
+	writeCmd(t, conn, "SELECT", "9")
+	wantReply(t, reader, "-ERR DB index is out of range\r\n")
+
+	writeCmd(t, conn, "SELECT", "abc")
+	wantReply(t, reader, "-ERR value is not an integer or out of range\r\n")
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
+func waitAddr(t *testing.T, srv *server.Server) string {
 	t.Helper()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -174,7 +246,7 @@ func waitForAddr(t *testing.T, srv *server.Server) string {
 	return ""
 }
 
-func writeRESP(t *testing.T, conn net.Conn, parts ...string) {
+func writeCmd(t *testing.T, conn net.Conn, parts ...string) {
 	t.Helper()
 
 	var builder strings.Builder
@@ -195,19 +267,19 @@ func writeRESP(t *testing.T, conn net.Conn, parts ...string) {
 	}
 }
 
-func assertReply(t *testing.T, reader *bufio.Reader, want string) {
+func wantReply(t *testing.T, reader *bufio.Reader, want string) {
 	t.Helper()
 
-	got := readReply(t, reader)
+	got := readResp(t, reader)
 	if got != want {
 		t.Fatalf("unexpected reply\nwant: %q\ngot:  %q", want, got)
 	}
 }
 
-func assertIntegerReplyInRange(t *testing.T, reader *bufio.Reader, min, max int64) {
+func wantInt(t *testing.T, reader *bufio.Reader, min, max int64) {
 	t.Helper()
 
-	got := readReply(t, reader)
+	got := readResp(t, reader)
 	if len(got) < 3 || got[0] != ':' {
 		t.Fatalf("expected integer reply, got %q", got)
 	}
@@ -222,7 +294,7 @@ func assertIntegerReplyInRange(t *testing.T, reader *bufio.Reader, min, max int6
 	}
 }
 
-func readReply(t *testing.T, reader *bufio.Reader) string {
+func readResp(t *testing.T, reader *bufio.Reader) string {
 	t.Helper()
 
 	line, err := reader.ReadString('\n')
