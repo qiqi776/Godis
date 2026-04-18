@@ -1,31 +1,32 @@
 package server
 
 import (
-	"godis/internal/command"
-	"godis/internal/common/logger"
-	"godis/internal/config"
 	"context"
 	"errors"
 	"net"
 	"sync"
+
+	"godis/internal/command"
+	"godis/internal/common/logger"
+	"godis/internal/config"
 )
 
 type Server struct {
-	cfg  	 config.Config
+	cfg      config.Config
 	logger   *logger.Logger
 	executor *command.Executor
-	mu 		 sync.RWMutex
+	mu       sync.RWMutex
 	listener net.Listener
-	conns 	 map[net.Conn]struct{}
-	wg 		 sync.WaitGroup
+	conns    map[net.Conn]struct{}
+	wg       sync.WaitGroup
 }
 
-func NewServer(cfg config.Config, l *logger.Logger, e *command.Executor) *Server {
+func New(cfg config.Config, l *logger.Logger, e *command.Executor) *Server {
 	return &Server{
-		cfg: cfg,
-		logger: l,
+		cfg:      cfg,
+		logger:   l,
 		executor: e,
-		conns: make(map[net.Conn]struct{}),
+		conns:    make(map[net.Conn]struct{}),
 	}
 }
 
@@ -62,7 +63,7 @@ func (s *Server) Run(ctx context.Context) error {
 			s.handleConn(c)
 		}(conn)
 	}
-	
+
 	s.wg.Wait()
 	return nil
 }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+
 	"godis/internal/command"
 	"godis/internal/common/logger"
 	"godis/internal/config"
@@ -10,30 +11,30 @@ import (
 )
 
 type App struct {
-	Config 	 config.Config
+	Config   config.Config
 	Logger   *logger.Logger
 	Engine   *engine.Engine
 	Executor *command.Executor
 	Server   *server.Server
 }
 
-func Start(cfgPath string) (*App, error) {
+func Bootstrap(cfgPath string) (*App, error) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return nil, err
 	}
 
 	l := logger.New(cfg.LogLevel)
-	eng := engine.NewEngine(cfg.Databases)
+	eng := engine.New(cfg.Databases)
 	exec := command.NewExecutor(eng)
-	srv := server.NewServer(cfg, l, exec)
+	srv := server.New(cfg, l, exec)
 
 	return &App{
-		Config: cfg,
-		Logger: l,
-		Engine: eng,
+		Config:   cfg,
+		Logger:   l,
+		Engine:   eng,
 		Executor: exec,
-		Server: srv,
+		Server:   srv,
 	}, nil
 }
 

@@ -2,16 +2,17 @@ package main
 
 import (
 	"context"
-	"godis/internal/app"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"godis/internal/app"
 )
 
 func main() {
 	cfgPath := os.Getenv("GODIS_CONFIG")
-	str, err := app.Start(cfgPath)
+	application, err := app.Bootstrap(cfgPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -19,7 +20,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := str.Run(ctx); err != nil {
+	if err := application.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
