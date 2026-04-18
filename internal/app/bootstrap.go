@@ -5,12 +5,14 @@ import (
 	"godis/internal/command"
 	"godis/internal/common/logger"
 	"godis/internal/config"
+	"godis/internal/engine"
 	"godis/internal/server"
 )
 
 type App struct {
 	Config 	 config.Config
 	Logger   *logger.Logger
+	Engine   *engine.Engine
 	Executor *command.Executor
 	Server   *server.Server
 }
@@ -22,17 +24,20 @@ func Start(cfgPath string) (*App, error) {
 	}
 
 	l := logger.New(cfg.LogLevel)
-	e := command.NewExecutor()
-	srv := server.NewServer(cfg, l, e)
+	eng := engine.NewEngine(cfg.Databases)
+	exec := command.NewExecutor(eng)
+	srv := server.NewServer(cfg, l, exec)
 
 	return &App{
 		Config: cfg,
 		Logger: l,
-		Executor: e,
+		Engine: eng,
+		Executor: exec,
 		Server: srv,
 	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
+	defer a.Engine.Close()
 	return a.Server.Run(ctx)
 }

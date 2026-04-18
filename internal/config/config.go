@@ -7,16 +7,18 @@ import (
 )
 
 type Config struct {
-	Host string 	`yaml:"host"`
-	Port int 	 	`yaml:"port"`
-	LogLevel string `yaml:"log_level"`
+	Host 	  string `yaml:"host"`
+	Port 	  int 	 `yaml:"port"`
+	LogLevel  string `yaml:"log_level"`
+	Databases int    `yaml:"databases"`
 }
 
 func Default() Config {
 	return Config{
-		Host: 	  "127.0.0.1",
-		Port: 	  6380,
-		LogLevel: "debug",
+		Host: 	   "127.0.0.1",
+		Port: 	   6380,
+		LogLevel:  "debug",
+		Databases: 16,
 	}
 }
 
@@ -41,6 +43,9 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 
+	if cfg.Databases <= 0 {
+		cfg.Databases = Default().Databases
+	}
 	return cfg, nil
 }
 
