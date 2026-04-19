@@ -193,3 +193,43 @@ func cmd(parts ...string) [][]byte {
     }
     return out
 }
+
+func TestList(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	if got := string(exec.Execute(sess, cmd("LPUSH", "list", "b", "a"))); got != ":2\r\n" {
+		t.Fatalf("unexpected LPUSH reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("RPUSH", "list", "c"))); got != ":3\r\n" {
+		t.Fatalf("unexpected RPUSH reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("LRANGE", "list", "0", "-1"))); got != "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n" {
+		t.Fatalf("unexpected LRANGE reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("LPOP", "list"))); got != "$1\r\na\r\n" {
+		t.Fatalf("unexpected LPOP reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("RPOP", "list"))); got != "$1\r\nc\r\n" {
+		t.Fatalf("unexpected RPOP reply: %q", got)
+	}
+}
+
+func TestType(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	exec.Execute(sess, cmd("SET", "key", "value"))
+
+	if got := string(exec.Execute(sess, cmd("LPUSH", "key", "a"))); got != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
+		t.Fatalf("unexpected LPUSH wrongtype reply: %q", got)
+	}
+}

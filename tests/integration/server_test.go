@@ -306,6 +306,20 @@ func readResp(t *testing.T, reader *bufio.Reader) string {
 		t.Fatal("empty reply")
 	}
 
+	if line[0] == '*' {
+		size, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(line, "*"), "\r\n"))
+		if err != nil {
+			t.Fatalf("parse array reply: %v", err)
+		}
+
+		var builder strings.Builder
+		builder.WriteString(line)
+		for i := 0; i < size; i++ {
+			builder.WriteString(readResp(t, reader))
+		}
+		return builder.String()
+	}
+
 	if line[0] != '$' {
 		return line
 	}
@@ -321,4 +335,78 @@ func readResp(t *testing.T, reader *bufio.Reader) string {
 	}
 
 	return line + body
+}
+
+func TestList(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Host:      "127.0.0.1",
+		Port:      0,
+		LogLevel:  "error",
+		Databases: 4,
+	}
+
+	eng := engine.New(cfg.Databases)
+	t.Cleanup(eng.Close)
+
+	exec := command.NewExecutor(eng)
+	srv := server.New(cfg, logger.NewDiscard(), exec)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Run(ctx)
+	}()
+
+	addr := waitAddr(t, srv)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		cancel()
+		t.Fatalf("dial server: %v", err)
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	writeCmd(t, conn, "LPUSH", "list", "b", "a")
+	wantReply(t, reader, ":2\r\n")
+
+	writeCmd(t, conn, "RPUSH", "list", "c")
+	wantReply(t, reader, ":3\r\n")
+
+	writeCmd(t, conn, "LRANGE", "list", "0", "-1")
+	wantReply(t, reader, "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n")
+
+	writeCmd(t, conn, "LPOP", "list")
+	wantReply(t, reader, "$1\r\na\r\n")
+
+	writeCmd(t, conn, "RPOP", "list")
+	wantReply(t, reader, "$1\r\nc\r\n")
+
+	writeCmd(t, conn, "SET", "str", "1")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "LPUSH", "str", "x")
+	wantReply(t, reader, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+
+	writeCmd(t, conn, "EXPIRE", "list", "1")
+	wantReply(t, reader, ":1\r\n")
+
+	time.Sleep(1100 * time.Millisecond)
+
+	writeCmd(t, conn, "LRANGE", "list", "0", "-1")
+	wantReply(t, reader, "*0\r\n")
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
 }

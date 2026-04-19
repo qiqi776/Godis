@@ -3,6 +3,7 @@ package resp
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 func SimpleString(value string) []byte {
@@ -23,4 +24,15 @@ func Integer(value int64) []byte {
 
 func NullBulkString() []byte {
 	return []byte("$-1\r\n")
+}
+
+func ArrayBulkStrings(values [][]byte) []byte {
+	var builder strings.Builder
+	builder.WriteString("*")
+	builder.WriteString(strconv.Itoa(len(values)))
+	builder.WriteString("\r\n")
+	for _, value := range values {
+		builder.Write(BulkString(value))
+	}
+	return []byte(builder.String())
 }

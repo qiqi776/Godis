@@ -47,6 +47,11 @@ func (e *Executor) registerBase() {
 	e.register("TTL", 1, 1, e.execTTL)
 	e.register("PERSIST", 1, 1, e.execPersist)
 	e.register("SELECT", 1, 1, e.execSelect)
+	e.register("LPUSH", 2, -1, e.execLPush)
+	e.register("RPUSH", 2, -1, e.execRPush)
+	e.register("LPOP", 1, 1, e.execLPop)
+	e.register("RPOP", 1, 1, e.execRPop)
+	e.register("LRANGE", 3, 3, e.execLRange)
 }
 
 func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
@@ -80,7 +85,10 @@ func (e *Executor) execGet(session Session, args [][]byte) []byte {
 		return resp.Error("ERR DB index is out of range")
 	}
 
-	value, ok := db.Get(string(args[0]))
+	value, ok, err := db.Get(string(args[0]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
 	if !ok {
 		return resp.NullBulkString()
 	}
@@ -174,6 +182,87 @@ func (e *Executor) execSelect(session Session, args [][]byte) []byte {
 
 	session.SetDBIndex(index)
 	return resp.SimpleString("OK")
+}
+
+func (e *Executor) execLPush(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	n, err := db.LPush(string(args[0]), args[1:]...)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(n)
+}
+
+func (e *Executor) execRPush(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	n, err := db.RPush(string(args[0]), args[1:]...)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(n)
+}
+
+func (e *Executor) execLPop(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	value, ok, err := db.LPop(string(args[0]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	if !ok {
+		return resp.NullBulkString()
+	}
+	return resp.BulkString(value)
+}
+
+func (e *Executor) execRPop(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	value, ok, err := db.RPop(string(args[0]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	if !ok {
+		return resp.NullBulkString()
+	}
+	return resp.BulkString(value)
+}
+
+func (e *Executor) execLRange(session Session, args [][]byte) []byte {
+	start, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Error("ERR value is not an integer or out of range")
+	}
+
+	stop, err := strconv.ParseInt(string(args[2]), 10, 64)
+	if err != nil {
+		return resp.Error("ERR value is not an integer or out of range")
+	}
+
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	values, err := db.LRange(string(args[0]), start, stop)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.ArrayBulkStrings(values)
 }
 
 func wrongArity(command string) []byte {

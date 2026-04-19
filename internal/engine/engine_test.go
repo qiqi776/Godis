@@ -15,7 +15,10 @@ func TestKV(t *testing.T) {
 
 	db.Set("name", []byte("godis"))
 
-	value, ok := db.Get("name")
+	value, ok, err := db.Get("name")
+	if err != nil {
+		t.Fatalf("unexpected get error: %v", err)
+	}
 	if !ok {
 		t.Fatal("expected key to exist")
 	}
@@ -31,7 +34,7 @@ func TestKV(t *testing.T) {
 		t.Fatalf("unexpected del result: %d", got)
 	}
 
-	if _, ok := db.Get("name"); ok {
+	if _, ok, err := db.Get("name"); err != nil || ok {
 		t.Fatal("expected key to be deleted")
 	}
 
@@ -48,14 +51,20 @@ func TestCopy(t *testing.T) {
 
 	db.Set("k", []byte("abc"))
 
-	value, ok := db.Get("k")
+	value, ok, err := db.Get("k")
+	if err != nil {
+		t.Fatalf("unexpected get error: %v", err)
+	}
 	if !ok {
 		t.Fatal("expected key to exist")
 	}
 
 	value[0] = 'z'
 
-	again, ok := db.Get("k")
+	again, ok, err := db.Get("k")
+	if err != nil {
+		t.Fatalf("unexpected get error: %v", err)
+	}
 	if !ok {
 		t.Fatal("expected key to exist on second read")
 	}
@@ -78,7 +87,11 @@ func TestConcurrent(t *testing.T) {
 			key := "k" + strconv.Itoa(i)
 			val := "v" + strconv.Itoa(i)
 			db.Set(key, []byte(val))
-			got, ok := db.Get(key)
+			got, ok, err := db.Get(key)
+			if err != nil {
+				t.Errorf("unexpected get error for %s: %v", key, err)
+				return
+			}
 			if !ok {
 				t.Errorf("expected key %s to exist", key)
 				return
@@ -146,7 +159,7 @@ func TestExpire(t *testing.T) {
 
 	time.Sleep(80 * time.Millisecond)
 
-	if _, ok := db.Get("gone"); ok {
+	if _, ok, err := db.Get("gone"); err != nil || ok {
 		t.Fatal("expected expired key to be removed")
 	}
 
