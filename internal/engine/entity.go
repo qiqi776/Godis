@@ -7,6 +7,10 @@ type Kind uint8
 const (
 	KindString Kind = iota + 1
 	KindList
+	KindHash
+	KindSet
+	KindZSet
+	KindBitmap
 )
 
 type Entity struct {

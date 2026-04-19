@@ -233,3 +233,169 @@ func TestType(t *testing.T) {
 		t.Fatalf("unexpected LPUSH wrongtype reply: %q", got)
 	}
 }
+
+func TestHash(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	if got := string(exec.Execute(sess, cmd("HSET", "user", "name", "godis"))); got != ":1\r\n" {
+		t.Fatalf("unexpected HSET reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("HGET", "user", "name"))); got != "$5\r\ngodis\r\n" {
+		t.Fatalf("unexpected HGET reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("HSET", "user", "name", "redis"))); got != ":0\r\n" {
+		t.Fatalf("unexpected HSET update reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("HGETALL", "user"))); got != "*2\r\n$4\r\nname\r\n$5\r\nredis\r\n" {
+		t.Fatalf("unexpected HGETALL reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("HDEL", "user", "name"))); got != ":1\r\n" {
+		t.Fatalf("unexpected HDEL reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("HGET", "user", "name"))); got != "$-1\r\n" {
+		t.Fatalf("unexpected HGET missing reply: %q", got)
+	}
+}
+
+func TestHashType(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	exec.Execute(sess, cmd("SET", "key", "value"))
+
+	if got := string(exec.Execute(sess, cmd("HSET", "key", "field", "x"))); got != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
+		t.Fatalf("unexpected HSET wrongtype reply: %q", got)
+	}
+}
+
+func TestSetData(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	if got := string(exec.Execute(sess, cmd("SADD", "tags", "go", "redis", "go"))); got != ":2\r\n" {
+		t.Fatalf("unexpected SADD reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("SISMEMBER", "tags", "go"))); got != ":1\r\n" {
+		t.Fatalf("unexpected SISMEMBER reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("SMEMBERS", "tags"))); got != "*2\r\n$2\r\ngo\r\n$5\r\nredis\r\n" {
+		t.Fatalf("unexpected SMEMBERS reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("SREM", "tags", "go"))); got != ":1\r\n" {
+		t.Fatalf("unexpected SREM reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("SISMEMBER", "tags", "go"))); got != ":0\r\n" {
+		t.Fatalf("unexpected SISMEMBER reply after remove: %q", got)
+	}
+}
+
+func TestSetType(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	exec.Execute(sess, cmd("SET", "key", "value"))
+
+	if got := string(exec.Execute(sess, cmd("SADD", "key", "a"))); got != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
+		t.Fatalf("unexpected SADD wrongtype reply: %q", got)
+	}
+}
+
+func TestZSet(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	if got := string(exec.Execute(sess, cmd("ZADD", "rank", "1", "a"))); got != ":1\r\n" {
+		t.Fatalf("unexpected ZADD reply: %q", got)
+	}
+	if got := string(exec.Execute(sess, cmd("ZADD", "rank", "2", "b"))); got != ":1\r\n" {
+		t.Fatalf("unexpected ZADD reply: %q", got)
+	}
+	if got := string(exec.Execute(sess, cmd("ZADD", "rank", "3", "a"))); got != ":0\r\n" {
+		t.Fatalf("unexpected ZADD update reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("ZSCORE", "rank", "a"))); got != "$1\r\n3\r\n" {
+		t.Fatalf("unexpected ZSCORE reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("ZRANGE", "rank", "0", "-1"))); got != "*2\r\n$1\r\nb\r\n$1\r\na\r\n" {
+		t.Fatalf("unexpected ZRANGE reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("ZREM", "rank", "b"))); got != ":1\r\n" {
+		t.Fatalf("unexpected ZREM reply: %q", got)
+	}
+}
+
+func TestZSetType(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	exec.Execute(sess, cmd("SET", "key", "value"))
+
+	if got := string(exec.Execute(sess, cmd("ZADD", "key", "1", "a"))); got != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
+		t.Fatalf("unexpected ZADD wrongtype reply: %q", got)
+	}
+}
+
+func TestBitmap(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	if got := string(exec.Execute(sess, cmd("SETBIT", "bits", "7", "1"))); got != ":0\r\n" {
+		t.Fatalf("unexpected SETBIT reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("GETBIT", "bits", "7"))); got != ":1\r\n" {
+		t.Fatalf("unexpected GETBIT reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("BITCOUNT", "bits"))); got != ":1\r\n" {
+		t.Fatalf("unexpected BITCOUNT reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("SETBIT", "bits", "7", "0"))); got != ":1\r\n" {
+		t.Fatalf("unexpected SETBIT reset reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("BITCOUNT", "bits"))); got != ":0\r\n" {
+		t.Fatalf("unexpected BITCOUNT after reset: %q", got)
+	}
+}
+
+func TestBitmapType(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	exec.Execute(sess, cmd("SET", "key", "value"))
+
+	if got := string(exec.Execute(sess, cmd("SETBIT", "key", "1", "1"))); got != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
+		t.Fatalf("unexpected SETBIT wrongtype reply: %q", got)
+	}
+}

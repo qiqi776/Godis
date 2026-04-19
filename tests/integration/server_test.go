@@ -16,8 +16,8 @@ import (
 	"godis/internal/server"
 )
 
-func TestKV(t *testing.T) {
-	t.Parallel()
+func newTestClient(t *testing.T) (net.Conn, *bufio.Reader) {
+	t.Helper()
 
 	cfg := config.Config{
 		Host:      "127.0.0.1",
@@ -45,9 +45,28 @@ func TestKV(t *testing.T) {
 		cancel()
 		t.Fatalf("dial server: %v", err)
 	}
-	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
+	t.Cleanup(func() {
+		_ = conn.Close()
+		cancel()
+
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("server shutdown: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("server did not stop")
+		}
+	})
+
+	return conn, bufio.NewReader(conn)
+}
+
+func TestKV(t *testing.T) {
+	t.Parallel()
+
+	conn, reader := newTestClient(t)
 
 	writeCmd(t, conn, "PING")
 	wantReply(t, reader, "+PONG\r\n")
@@ -70,50 +89,12 @@ func TestKV(t *testing.T) {
 	writeCmd(t, conn, "NOPE")
 	wantReply(t, reader, "-ERR unknown command 'nope'\r\n")
 
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("server shutdown: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not stop")
-	}
 }
 
 func TestTTL(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.Config{
-		Host:      "127.0.0.1",
-		Port:      0,
-		LogLevel:  "error",
-		Databases: 4,
-	}
-
-	eng := engine.New(cfg.Databases)
-	t.Cleanup(eng.Close)
-
-	exec := command.NewExecutor(eng)
-	srv := server.New(cfg, logger.NewDiscard(), exec)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.Run(ctx)
-	}()
-
-	addr := waitAddr(t, srv)
-
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		cancel()
-		t.Fatalf("dial server: %v", err)
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
+	conn, reader := newTestClient(t)
 
 	writeCmd(t, conn, "SET", "temp", "42")
 	wantReply(t, reader, "+OK\r\n")
@@ -147,50 +128,12 @@ func TestTTL(t *testing.T) {
 	writeCmd(t, conn, "PERSIST", "missing")
 	wantReply(t, reader, ":0\r\n")
 
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("server shutdown: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not stop")
-	}
 }
 
 func TestSelect(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.Config{
-		Host:      "127.0.0.1",
-		Port:      0,
-		LogLevel:  "error",
-		Databases: 4,
-	}
-
-	eng := engine.New(cfg.Databases)
-	t.Cleanup(eng.Close)
-
-	exec := command.NewExecutor(eng)
-	srv := server.New(cfg, logger.NewDiscard(), exec)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.Run(ctx)
-	}()
-
-	addr := waitAddr(t, srv)
-
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		cancel()
-		t.Fatalf("dial server: %v", err)
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
+	conn, reader := newTestClient(t)
 
 	writeCmd(t, conn, "SET", "a", "1")
 	wantReply(t, reader, "+OK\r\n")
@@ -219,16 +162,6 @@ func TestSelect(t *testing.T) {
 	writeCmd(t, conn, "SELECT", "abc")
 	wantReply(t, reader, "-ERR value is not an integer or out of range\r\n")
 
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("server shutdown: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not stop")
-	}
 }
 
 func waitAddr(t *testing.T, srv *server.Server) string {
@@ -340,35 +273,7 @@ func readResp(t *testing.T, reader *bufio.Reader) string {
 func TestList(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.Config{
-		Host:      "127.0.0.1",
-		Port:      0,
-		LogLevel:  "error",
-		Databases: 4,
-	}
-
-	eng := engine.New(cfg.Databases)
-	t.Cleanup(eng.Close)
-
-	exec := command.NewExecutor(eng)
-	srv := server.New(cfg, logger.NewDiscard(), exec)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.Run(ctx)
-	}()
-
-	addr := waitAddr(t, srv)
-
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		cancel()
-		t.Fatalf("dial server: %v", err)
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
+	conn, reader := newTestClient(t)
 
 	writeCmd(t, conn, "LPUSH", "list", "b", "a")
 	wantReply(t, reader, ":2\r\n")
@@ -399,14 +304,122 @@ func TestList(t *testing.T) {
 	writeCmd(t, conn, "LRANGE", "list", "0", "-1")
 	wantReply(t, reader, "*0\r\n")
 
-	cancel()
+}
 
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("server shutdown: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not stop")
-	}
+func TestHash(t *testing.T) {
+	t.Parallel()
+
+	conn, reader := newTestClient(t)
+
+	writeCmd(t, conn, "HSET", "user", "name", "godis")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "HGET", "user", "name")
+	wantReply(t, reader, "$5\r\ngodis\r\n")
+
+	writeCmd(t, conn, "HSET", "user", "name", "redis")
+	wantReply(t, reader, ":0\r\n")
+
+	writeCmd(t, conn, "HGETALL", "user")
+	wantReply(t, reader, "*2\r\n$4\r\nname\r\n$5\r\nredis\r\n")
+
+	writeCmd(t, conn, "HDEL", "user", "name")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "HGET", "user", "name")
+	wantReply(t, reader, "$-1\r\n")
+
+	writeCmd(t, conn, "SET", "str", "1")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "HSET", "str", "field", "x")
+	wantReply(t, reader, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+
+}
+
+func TestSetData(t *testing.T) {
+	t.Parallel()
+
+	conn, reader := newTestClient(t)
+
+	writeCmd(t, conn, "SADD", "tags", "go", "redis", "go")
+	wantReply(t, reader, ":2\r\n")
+
+	writeCmd(t, conn, "SISMEMBER", "tags", "go")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "SMEMBERS", "tags")
+	wantReply(t, reader, "*2\r\n$2\r\ngo\r\n$5\r\nredis\r\n")
+
+	writeCmd(t, conn, "SREM", "tags", "go")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "SISMEMBER", "tags", "go")
+	wantReply(t, reader, ":0\r\n")
+
+	writeCmd(t, conn, "SET", "str", "1")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "SADD", "str", "x")
+	wantReply(t, reader, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+
+}
+
+func TestZSet(t *testing.T) {
+	t.Parallel()
+
+	conn, reader := newTestClient(t)
+
+	writeCmd(t, conn, "ZADD", "rank", "1", "a")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "ZADD", "rank", "2", "b")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "ZADD", "rank", "3", "a")
+	wantReply(t, reader, ":0\r\n")
+
+	writeCmd(t, conn, "ZSCORE", "rank", "a")
+	wantReply(t, reader, "$1\r\n3\r\n")
+
+	writeCmd(t, conn, "ZRANGE", "rank", "0", "-1")
+	wantReply(t, reader, "*2\r\n$1\r\nb\r\n$1\r\na\r\n")
+
+	writeCmd(t, conn, "ZREM", "rank", "b")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "SET", "str", "1")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "ZADD", "str", "1", "x")
+	wantReply(t, reader, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+
+}
+
+func TestBitmap(t *testing.T) {
+	t.Parallel()
+
+	conn, reader := newTestClient(t)
+
+	writeCmd(t, conn, "SETBIT", "bits", "7", "1")
+	wantReply(t, reader, ":0\r\n")
+
+	writeCmd(t, conn, "GETBIT", "bits", "7")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "BITCOUNT", "bits")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "SETBIT", "bits", "7", "0")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "BITCOUNT", "bits")
+	wantReply(t, reader, ":0\r\n")
+
+	writeCmd(t, conn, "SET", "str", "1")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "SETBIT", "str", "1", "1")
+	wantReply(t, reader, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+
 }

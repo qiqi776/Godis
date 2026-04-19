@@ -1,65 +1,59 @@
 package engine
 
-import listds "godis/internal/datastruct/list"
+import "godis/internal/datastruct/list"
 
 func (db *DB) LPush(key string, values ...[]byte) (int64, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	l, ok, err := db.getListValue(key)
+	lst, ok, err := getValue[*list.List](db, key, KindList)
 	if err != nil {
 		return 0, err
 	}
 	if !ok {
-		l = listds.New()
-		db.data[key] = &Entity{
-			Kind:  KindList,
-			Value: l,
-		}
+		lst = list.New()
+		db.setValue(key, KindList, lst)
 	}
 
 	for _, value := range values {
-		l.PushFront(value)
+		lst.PushFront(value)
 	}
-	return int64(l.Len()), nil
+	return int64(lst.Len()), nil
 }
 
 func (db *DB) RPush(key string, values ...[]byte) (int64, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	l, ok, err := db.getListValue(key)
+	lst, ok, err := getValue[*list.List](db, key, KindList)
 	if err != nil {
 		return 0, err
 	}
 	if !ok {
-		l = listds.New()
-		db.data[key] = &Entity{
-			Kind:  KindList,
-			Value: l,
-		}
+		lst = list.New()
+		db.setValue(key, KindList, lst)
 	}
 
 	for _, value := range values {
-		l.PushBack(value)
+		lst.PushBack(value)
 	}
-	return int64(l.Len()), nil
+	return int64(lst.Len()), nil
 }
 
 func (db *DB) LPop(key string) ([]byte, bool, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	l, ok, err := db.getListValue(key)
+	lst, ok, err := getValue[*list.List](db, key, KindList)
 	if err != nil || !ok {
 		return nil, false, err
 	}
 
-	value, ok := l.PopFront()
+	value, ok := lst.PopFront()
 	if !ok {
 		return nil, false, nil
 	}
-	if l.Len() == 0 {
+	if lst.Len() == 0 {
 		db.deleteKey(key)
 	}
 	return value, true, nil
@@ -69,16 +63,16 @@ func (db *DB) RPop(key string) ([]byte, bool, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	l, ok, err := db.getListValue(key)
+	lst, ok, err := getValue[*list.List](db, key, KindList)
 	if err != nil || !ok {
 		return nil, false, err
 	}
 
-	value, ok := l.PopBack()
+	value, ok := lst.PopBack()
 	if !ok {
 		return nil, false, nil
 	}
-	if l.Len() == 0 {
+	if lst.Len() == 0 {
 		db.deleteKey(key)
 	}
 	return value, true, nil
@@ -88,7 +82,7 @@ func (db *DB) LRange(key string, start, stop int64) ([][]byte, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	l, ok, err := db.getListValue(key)
+	lst, ok, err := getValue[*list.List](db, key, KindList)
 	if err != nil {
 		return nil, err
 	}
@@ -96,29 +90,11 @@ func (db *DB) LRange(key string, start, stop int64) ([][]byte, error) {
 		return [][]byte{}, nil
 	}
 
-	from, to, ok := normalizeRange(l.Len(), start, stop)
+	from, to, ok := normalizeRange(lst.Len(), start, stop)
 	if !ok {
 		return [][]byte{}, nil
 	}
-	return l.Range(from, to), nil
-}
-
-func (db *DB) getListValue(key string) (*listds.List, bool, error) {
-	if db.isExpired(key) {
-		db.deleteKey(key)
-		return nil, false, nil
-	}
-
-	entity, ok := db.data[key]
-	if !ok {
-		return nil, false, nil
-	}
-	if entity.Kind != KindList {
-		return nil, false, ErrWrongType
-	}
-
-	l, _ := entity.Value.(*listds.List)
-	return l, true, nil
+	return lst.Range(from, to), nil
 }
 
 func normalizeRange(size int, start, stop int64) (int, int, bool) {

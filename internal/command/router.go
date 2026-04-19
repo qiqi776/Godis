@@ -52,6 +52,22 @@ func (e *Executor) registerBase() {
 	e.register("LPOP", 1, 1, e.execLPop)
 	e.register("RPOP", 1, 1, e.execRPop)
 	e.register("LRANGE", 3, 3, e.execLRange)
+	e.register("HSET", 3, 3, e.execHSet)
+	e.register("HGET", 2, 2, e.execHGet)
+	e.register("HDEL", 2, -1, e.execHDel)
+	e.register("HGETALL", 1, 1, e.execHGetAll)
+	e.register("SADD", 2, -1, e.execSAdd)
+	e.register("SREM", 2, -1, e.execSRem)
+	e.register("SMEMBERS", 1, 1, e.execSMembers)
+	e.register("SISMEMBER", 2, 2, e.execSIsMember)
+	e.register("ZADD", 3, 3, e.execZAdd)
+	e.register("ZREM", 2, -1, e.execZRem)
+	e.register("ZRANGE", 3, 3, e.execZRange)
+	e.register("ZSCORE", 2, 2, e.execZScore)
+	e.register("SETBIT", 3, 3, e.execSetBit)
+	e.register("GETBIT", 2, 2, e.execGetBit)
+	e.register("BITCOUNT", 1, 1, e.execBitCount)
+
 }
 
 func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
@@ -271,4 +287,260 @@ func wrongArity(command string) []byte {
 	buf.WriteString(command)
 	buf.WriteString("' command")
 	return resp.Error(buf.String())
+}
+
+func (e *Executor) execHSet(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	n, err := db.HSet(string(args[0]), string(args[1]), args[2])
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(n)
+}
+
+func (e *Executor) execHGet(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	value, ok, err := db.HGet(string(args[0]), string(args[1]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	if !ok {
+		return resp.NullBulkString()
+	}
+	return resp.BulkString(value)
+}
+
+func (e *Executor) execHDel(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	fields := make([]string, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		fields = append(fields, string(arg))
+	}
+
+	n, err := db.HDel(string(args[0]), fields...)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(n)
+}
+
+func (e *Executor) execHGetAll(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	values, err := db.HGetAll(string(args[0]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.ArrayBulkStrings(values)
+}
+
+func (e *Executor) execSAdd(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	members := make([]string, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		members = append(members, string(arg))
+	}
+
+	n, err := db.SAdd(string(args[0]), members...)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(n)
+}
+
+func (e *Executor) execSRem(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	members := make([]string, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		members = append(members, string(arg))
+	}
+
+	n, err := db.SRem(string(args[0]), members...)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(n)
+}
+
+func (e *Executor) execSMembers(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	values, err := db.SMembers(string(args[0]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.ArrayBulkStrings(values)
+}
+
+func (e *Executor) execSIsMember(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	ok, err := db.SIsMember(string(args[0]), string(args[1]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	if ok {
+		return resp.Integer(1)
+	}
+	return resp.Integer(0)
+}
+
+func (e *Executor) execZAdd(session Session, args [][]byte) []byte {
+	score, err := strconv.ParseFloat(string(args[1]), 64)
+	if err != nil {
+		return resp.Error("ERR value is not a valid float")
+	}
+
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	n, err := db.ZAdd(string(args[0]), score, string(args[2]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(n)
+}
+
+func (e *Executor) execZRem(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	members := make([]string, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		members = append(members, string(arg))
+	}
+
+	n, err := db.ZRem(string(args[0]), members...)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(n)
+}
+
+func (e *Executor) execZRange(session Session, args [][]byte) []byte {
+	start, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Error("ERR value is not an integer or out of range")
+	}
+	stop, err := strconv.ParseInt(string(args[2]), 10, 64)
+	if err != nil {
+		return resp.Error("ERR value is not an integer or out of range")
+	}
+
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	values, err := db.ZRange(string(args[0]), start, stop)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.ArrayBulkStrings(values)
+}
+
+func (e *Executor) execZScore(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	score, ok, err := db.ZScore(string(args[0]), string(args[1]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	if !ok {
+		return resp.NullBulkString()
+	}
+	return resp.BulkString([]byte(strconv.FormatFloat(score, 'f', -1, 64)))
+}
+
+func (e *Executor) execSetBit(session Session, args [][]byte) []byte {
+	offset, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Error("ERR bit offset is not an integer or out of range")
+	}
+
+	bit, err := strconv.Atoi(string(args[2]))
+	if err != nil {
+		return resp.Error("ERR bit is not an integer or out of range")
+	}
+	if bit != 0 && bit != 1 {
+		return resp.Error("ERR bit is not an integer or out of range")
+	}
+
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	old, err := db.SetBit(string(args[0]), offset, bit)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(old)
+}
+
+func (e *Executor) execGetBit(session Session, args [][]byte) []byte {
+	offset, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Error("ERR bit offset is not an integer or out of range")
+	}
+
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	bit, err := db.GetBit(string(args[0]), offset)
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(bit)
+}
+
+func (e *Executor) execBitCount(session Session, args [][]byte) []byte {
+	db := e.engine.DB(session.GetDBIndex())
+	if db == nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+
+	count, err := db.BitCount(string(args[0]))
+	if err != nil {
+		return resp.Error(err.Error())
+	}
+	return resp.Integer(count)
 }
