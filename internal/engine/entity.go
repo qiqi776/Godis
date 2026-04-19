@@ -22,14 +22,3 @@ func copyBytes(src []byte) []byte {
 	}
 	return append([]byte(nil), src...)
 }
-
-func copyByteSlices(src [][]byte) [][]byte {
-	if len(src) == 0 {
-		return nil
-	}
-	out := make([][]byte, 0, len(src))
-	for _, item := range src {
-		out = append(out, copyBytes(item))
-	}
-	return out
-}
