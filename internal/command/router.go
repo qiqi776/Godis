@@ -16,13 +16,37 @@ type Session interface {
 }
 
 type Executor struct {
-	engine *engine.Engine
+	engine   *engine.Engine
+	commands map[string]Meta
 }
 
 func NewExecutor(eng *engine.Engine) *Executor {
-	return &Executor{
+	e := &Executor{
 		engine: eng,
+		commands: make(map[string]Meta),
 	}
+	e.registerBase()
+	return e
+}
+
+func (e *Executor) register(name string, minArgs int, maxArgs int, exec Handler) {
+	e.commands[name] = Meta{
+		MinArgs: minArgs,
+		MaxArgs: maxArgs,
+		Exec:    exec,
+	}
+}
+
+func (e *Executor) registerBase() {
+	e.register("PING", 0, 1, e.execPing)
+	e.register("GET", 1, 1, e.execGet)
+	e.register("SET", 2, 2, e.execSet)
+	e.register("DEL", 1, -1, e.execDel)
+	e.register("EXISTS", 1, -1, e.execExists)
+	e.register("EXPIRE", 2, 2, e.execExpire)
+	e.register("TTL", 1, 1, e.execTTL)
+	e.register("PERSIST", 1, 1, e.execPersist)
+	e.register("SELECT", 1, 1, e.execSelect)
 }
 
 func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
@@ -31,36 +55,19 @@ func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
 	}
 
 	name := strings.ToUpper(string(tokens[0]))
-	args := tokens[1:]
-
-	switch name {
-	case "PING":
-		return e.execPing(args)
-	case "GET":
-		return e.execGet(session, args)
-	case "SET":
-		return e.execSet(session, args)
-	case "DEL":
-		return e.execDel(session, args)
-	case "EXISTS":
-		return e.execExists(session, args)
-	case "EXPIRE":
-		return e.execExpire(session, args)
-	case "TTL":
-		return e.execTTL(session, args)
-	case "PERSIST":
-		return e.execPersist(session, args)
-	case "SELECT":
-		return e.execSelect(session, args)
-	default:
+	meta, ok := e.commands[name]
+	if !ok {
 		return resp.Error("ERR unknown command '" + strings.ToLower(name) + "'")
 	}
+
+	args := tokens[1:]
+	if !meta.Match(len(args)) {
+		return wrongArity(strings.ToLower(name))
+	}
+	return meta.Exec(session, args)
 }
 
-func (e *Executor) execPing(args [][]byte) []byte {
-	if len(args) > 1 {
-		return wrongArity("ping")
-	}
+func (e *Executor) execPing(_ Session, args [][]byte) []byte {
 	if len(args) == 1 {
 		return resp.BulkString(args[0])
 	}
@@ -68,10 +75,6 @@ func (e *Executor) execPing(args [][]byte) []byte {
 }
 
 func (e *Executor) execGet(session Session, args [][]byte) []byte {
-	if len(args) != 1 {
-		return wrongArity("get")
-	}
-
 	db := e.engine.DB(session.GetDBIndex())
 	if db == nil {
 		return resp.Error("ERR DB index is out of range")
@@ -85,10 +88,6 @@ func (e *Executor) execGet(session Session, args [][]byte) []byte {
 }
 
 func (e *Executor) execSet(session Session, args [][]byte) []byte {
-	if len(args) != 2 {
-		return wrongArity("set")
-	}
-
 	db := e.engine.DB(session.GetDBIndex())
 	if db == nil {
 		return resp.Error("ERR DB index is out of range")
@@ -99,10 +98,6 @@ func (e *Executor) execSet(session Session, args [][]byte) []byte {
 }
 
 func (e *Executor) execDel(session Session, args [][]byte) []byte {
-	if len(args) < 1 {
-		return wrongArity("del")
-	}
-
 	db := e.engine.DB(session.GetDBIndex())
 	if db == nil {
 		return resp.Error("ERR DB index is out of range")
@@ -117,10 +112,6 @@ func (e *Executor) execDel(session Session, args [][]byte) []byte {
 }
 
 func (e *Executor) execExists(session Session, args [][]byte) []byte {
-	if len(args) < 1 {
-		return wrongArity("exists")
-	}
-
 	db := e.engine.DB(session.GetDBIndex())
 	if db == nil {
 		return resp.Error("ERR DB index is out of range")
@@ -135,10 +126,6 @@ func (e *Executor) execExists(session Session, args [][]byte) []byte {
 }
 
 func (e *Executor) execExpire(session Session, args [][]byte) []byte {
-	if len(args) != 2 {
-		return wrongArity("expire")
-	}
-
 	seconds, err := strconv.ParseInt(string(args[1]), 10, 64)
 	if err != nil {
 		return resp.Error("ERR value is not an integer or out of range")
@@ -156,10 +143,6 @@ func (e *Executor) execExpire(session Session, args [][]byte) []byte {
 }
 
 func (e *Executor) execTTL(session Session, args [][]byte) []byte {
-	if len(args) != 1 {
-		return wrongArity("ttl")
-	}
-
 	db := e.engine.DB(session.GetDBIndex())
 	if db == nil {
 		return resp.Error("ERR DB index is out of range")
@@ -169,10 +152,6 @@ func (e *Executor) execTTL(session Session, args [][]byte) []byte {
 }
 
 func (e *Executor) execPersist(session Session, args [][]byte) []byte {
-	if len(args) != 1 {
-		return wrongArity("persist")
-	}
-
 	db := e.engine.DB(session.GetDBIndex())
 	if db == nil {
 		return resp.Error("ERR DB index is out of range")
@@ -185,10 +164,6 @@ func (e *Executor) execPersist(session Session, args [][]byte) []byte {
 }
 
 func (e *Executor) execSelect(session Session, args [][]byte) []byte {
-	if len(args) != 1 {
-		return wrongArity("select")
-	}
-
 	index, err := strconv.Atoi(string(args[0]))
 	if err != nil {
 		return resp.Error("ERR value is not an integer or out of range")
