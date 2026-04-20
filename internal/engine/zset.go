@@ -15,7 +15,11 @@ func (db *DB) ZAdd(key string, score float64, member string) (int64, error) {
 		db.setValue(key, KindZSet, zs)
 	}
 
-	return zs.Add(member, score), nil
+	added, changed := zs.Add(member, score)
+    if ok && changed {
+        db.touchKey(key)
+    }
+	return added, nil
 }
 
 func (db *DB) ZRem(key string, members ...string) (int64, error) {
@@ -30,6 +34,8 @@ func (db *DB) ZRem(key string, members ...string) (int64, error) {
 	removed := zs.Remove(members...)
 	if zs.Len() == 0 {
 		db.deleteKey(key)
+	} else {
+		db.touchKey(key)
 	}
 	return removed, nil
 }

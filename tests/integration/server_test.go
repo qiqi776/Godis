@@ -456,3 +456,70 @@ func TestTx(t *testing.T) {
 	writeCmd(t, conn, "GET", "b")
 	wantReply(t, reader, "$-1\r\n")
 }
+
+func TestWatch(t *testing.T) {
+    t.Parallel()
+
+    cfg := config.Config{
+        Host:      "127.0.0.1",
+        Port:      0,
+        LogLevel:  "error",
+        Databases: 4,
+    }
+
+    eng := engine.New(cfg.Databases)
+    t.Cleanup(eng.Close)
+
+    exec := command.NewExecutor(eng)
+    srv := server.New(cfg, logger.NewDiscard(), exec)
+
+    ctx, cancel := context.WithCancel(context.Background())
+    errCh := make(chan error, 1)
+    go func() {
+        errCh <- srv.Run(ctx)
+    }()
+
+    addr := waitAddr(t, srv)
+
+    conn1, err := net.Dial("tcp", addr)
+    if err != nil {
+        cancel()
+        t.Fatalf("dial first client: %v", err)
+    }
+    defer conn1.Close()
+    reader1 := bufio.NewReader(conn1)
+
+    conn2, err := net.Dial("tcp", addr)
+    if err != nil {
+        cancel()
+        t.Fatalf("dial second client: %v", err)
+    }
+    defer conn2.Close()
+    reader2 := bufio.NewReader(conn2)
+
+    writeCmd(t, conn1, "WATCH", "a")
+    wantReply(t, reader1, "+OK\r\n")
+
+    writeCmd(t, conn1, "MULTI")
+    wantReply(t, reader1, "+OK\r\n")
+
+    writeCmd(t, conn1, "GET", "a")
+    wantReply(t, reader1, "+QUEUED\r\n")
+
+    writeCmd(t, conn2, "SET", "a", "1")
+    wantReply(t, reader2, "+OK\r\n")
+
+    writeCmd(t, conn1, "EXEC")
+    wantReply(t, reader1, "*-1\r\n")
+
+    cancel()
+
+    select {
+    case err := <-errCh:
+        if err != nil {
+            t.Fatalf("server shutdown: %v", err)
+        }
+    case <-time.After(2 * time.Second):
+        t.Fatal("server did not stop")
+    }
+}

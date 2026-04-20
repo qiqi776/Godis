@@ -25,9 +25,6 @@ func (db *DB) Set(key string, val []byte) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	db.data[key] = &Entity{
-		Kind:  KindString,
-		Value: copyBytes(val),
-	}
+	db.setValue(key, KindString, copyBytes(val))
 	delete(db.expireAt, key)
 }

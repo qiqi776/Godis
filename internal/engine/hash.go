@@ -13,8 +13,9 @@ func (db *DB) HSet(key, field string, value []byte) (int64, error) {
 	if !ok {
 		h = hash.New()
 		db.setValue(key, KindHash, h)
+	} else {
+		db.touchKey(key)
 	}
-
 	return h.Set(field, value), nil
 }
 
@@ -43,6 +44,8 @@ func (db *DB) HDel(key string, fields ...string) (int64, error) {
 	deleted := h.Del(fields...)
 	if h.Len() == 0 {
 		db.deleteKey(key)
+	} else {
+		db.touchKey(key)
 	}
 	return deleted, nil
 }

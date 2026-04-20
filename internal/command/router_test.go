@@ -10,9 +10,10 @@ import (
 )
 
 type testSession struct {
-	dbIndex int
-	inMulti bool
-	queued  [][][]byte
+    dbIndex int
+    inMulti bool
+    queued  [][][]byte
+    watched map[int]map[string]uint64
 }
 
 func (s *testSession) GetDBIndex() int {
@@ -51,6 +52,24 @@ func (s *testSession) Queued() [][][]byte {
 func (s *testSession) ClearMulti() {
 	s.inMulti = false
 	s.queued = nil
+}
+
+func (s *testSession) Watch(dbIndex int, key string, rev uint64) {
+    if s.watched == nil {
+        s.watched = make(map[int]map[string]uint64)
+    }
+    if s.watched[dbIndex] == nil {
+        s.watched[dbIndex] = make(map[string]uint64)
+    }
+    s.watched[dbIndex][key] = rev
+}
+
+func (s *testSession) Watched() map[int]map[string]uint64 {
+    return s.watched
+}
+
+func (s *testSession) ClearWatch() {
+    s.watched = nil
 }
 
 func TestPing(t *testing.T) {
@@ -503,4 +522,47 @@ func TestTxErr(t *testing.T) {
 	if got := string(exec.Execute(sess, cmd("MULTI"))); got != "-ERR MULTI calls can not be nested\r\n" {
 		t.Fatalf("unexpected nested MULTI reply: %q", got)
 	}
+}
+
+func TestWatch(t *testing.T) {
+    t.Parallel()
+
+    exec := NewExecutor(engine.New(2))
+    s1 := &testSession{}
+    s2 := &testSession{}
+
+    if got := string(exec.Execute(s1, cmd("WATCH", "a"))); got != "+OK\r\n" {
+        t.Fatalf("unexpected WATCH reply: %q", got)
+    }
+
+    if got := string(exec.Execute(s1, cmd("MULTI"))); got != "+OK\r\n" {
+        t.Fatalf("unexpected MULTI reply: %q", got)
+    }
+
+    if got := string(exec.Execute(s1, cmd("GET", "a"))); got != "+QUEUED\r\n" {
+        t.Fatalf("unexpected queued GET reply: %q", got)
+    }
+
+    if got := string(exec.Execute(s2, cmd("SET", "a", "1"))); got != "+OK\r\n" {
+        t.Fatalf("unexpected SET reply from second session: %q", got)
+    }
+
+    if got := string(exec.Execute(s1, cmd("EXEC"))); got != "*-1\r\n" {
+        t.Fatalf("unexpected EXEC abort reply: %q", got)
+    }
+}
+
+func TestWatchErr(t *testing.T) {
+    t.Parallel()
+
+    exec := NewExecutor(engine.New(2))
+    sess := &testSession{}
+
+    if got := string(exec.Execute(sess, cmd("MULTI"))); got != "+OK\r\n" {
+        t.Fatalf("unexpected MULTI reply: %q", got)
+    }
+
+    if got := string(exec.Execute(sess, cmd("WATCH", "a"))); got != "-ERR WATCH inside MULTI is not allowed\r\n" {
+        t.Fatalf("unexpected WATCH error reply: %q", got)
+    }
 }

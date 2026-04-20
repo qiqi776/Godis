@@ -18,6 +18,9 @@ type Session interface {
 	Queue([][]byte)
 	Queued() [][][]byte
 	ClearMulti()
+    Watch(int, string, uint64)
+    Watched() map[int]map[string]uint64
+    ClearWatch()
 }
 
 type Executor struct {
@@ -75,6 +78,7 @@ func (e *Executor) registerBase() {
 	e.register("MULTI", 0, 0, e.execMulti)
 	e.register("EXEC", 0, 0, e.execExec)
 	e.register("DISCARD", 0, 0, e.execDiscard)
+	e.register("WATCH", 1, -1, e.execWatch)
 }
 
 func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
@@ -94,7 +98,7 @@ func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
 	}
 
 	switch name {
-	case "MULTI", "EXEC", "DISCARD":
+	case "MULTI", "EXEC", "DISCARD", "WATCH":
 		return meta.Exec(session, args)
 	}
 	if session.InMulti() {
@@ -560,3 +564,4 @@ func (e *Executor) execBitCount(session Session, args [][]byte) []byte {
 	}
 	return resp.Integer(count)
 }
+

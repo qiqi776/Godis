@@ -15,7 +15,12 @@ func (db *DB) SAdd(key string, members ...string) (int64, error) {
 		db.setValue(key, KindSet, st)
 	}
 
-	return st.Add(members...), nil
+	added := st.Add(members...)
+	if ok && added > 0 {
+		db.touchKey(key)
+	}
+
+	return added, nil
 }
 
 func (db *DB) SRem(key string, members ...string) (int64, error) {
@@ -30,6 +35,8 @@ func (db *DB) SRem(key string, members ...string) (int64, error) {
 	removed := st.Remove(members...)
 	if st.Len() == 0 {
 		db.deleteKey(key)
+	} else {
+		db.touchKey(key)
 	}
 	return removed, nil
 }

@@ -15,7 +15,11 @@ func (db *DB) SetBit(key string, offset int64, bit int) (int64, error) {
 		db.setValue(key, KindBitmap, bm)
 	}
 
-	return bm.SetBit(offset, bit)
+	old, err := bm.SetBit(offset, bit)
+	if err != nil && ok {
+		db.touchKey(key)
+	}
+	return old, nil
 }
 
 func (db *DB) GetBit(key string, offset int64) (int64, error) {

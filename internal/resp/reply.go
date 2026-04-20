@@ -26,6 +26,10 @@ func NullBulkString() []byte {
 	return []byte("$-1\r\n")
 }
 
+func NullArray() []byte {
+    return []byte("*-1\r\n")
+}
+
 func ArrayBulkStrings(values [][]byte) []byte {
 	var builder strings.Builder
 	builder.WriteString("*")

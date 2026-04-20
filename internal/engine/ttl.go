@@ -67,6 +67,7 @@ func (db *DB) Persist(key string) bool {
 	}
 
 	delete(db.expireAt, key)
+	db.touchKey(key)
 	return true
 }
 
@@ -76,6 +77,13 @@ func (db *DB) isExpired(key string) bool {
 }
 
 func (db *DB) deleteKey(key string) {
-	delete(db.data, key)
-	delete(db.expireAt, key)
+    _, hadData := db.data[key]
+    _, hadExpire := db.expireAt[key]
+    if !hadData && !hadExpire {
+        return
+    }
+
+    delete(db.data, key)
+    delete(db.expireAt, key)
+    db.touchKey(key)
 }

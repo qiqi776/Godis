@@ -10,9 +10,11 @@ type Engine struct {
 }
 
 type DB struct {
-	mu       sync.RWMutex
-	data     map[string]*Entity
-	expireAt map[string]time.Time
+	mu        sync.RWMutex
+	data      map[string]*Entity
+	expireAt  map[string]time.Time
+	revisions map[string]uint64
+	nextRev   uint64
 }
 
 func New(databases int) *Engine {
@@ -23,8 +25,9 @@ func New(databases int) *Engine {
 	dbs := make([]*DB, 0, databases)
 	for i := 0; i < databases; i++ {
 		dbs = append(dbs, &DB{
-			data:     make(map[string]*Entity),
-			expireAt: make(map[string]time.Time),
+			data:      make(map[string]*Entity),
+			expireAt:  make(map[string]time.Time),
+			revisions: make(map[string]uint64),
 		})
 	}
 

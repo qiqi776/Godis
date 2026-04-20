@@ -28,4 +28,19 @@ func (db *DB) setValue(key string, kind Kind, value any) {
 		Kind:  kind,
 		Value: value,
 	}
+	db.touchKey(key)
+}
+
+func (db *DB) touchKey(key string) {
+	db.nextRev++
+	db.revisions[key] = db.nextRev
+}
+
+func (db *DB) Revision(key string) uint64 {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.isExpired(key) {
+		db.deleteKey(key)
+	}
+	return db.revisions[key]
 }

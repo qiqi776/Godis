@@ -23,22 +23,22 @@ func (z *ZSet) Len() int {
 	return z.dict.Len()
 }
 
-func (z *ZSet) Add(member string, score float64) int64 {
+func (z *ZSet) Add(member string, score float64) (int64, bool) {
 	raw, ok := z.dict.Get(member)
 	if ok {
 		oldScore := raw.(float64)
 		if oldScore == score {
-			return 0
+			return 0, false
 		}
 		z.sl.Remove(member, oldScore)
 		z.dict.Put(member, score)
 		z.sl.Insert(member, score)
-		return 0
+		return 0, true
 	}
 
 	z.dict.Put(member, score)
 	z.sl.Insert(member, score)
-	return 1
+	return 1, true
 }
 
 func (z *ZSet) Remove(members ...string) int64 {

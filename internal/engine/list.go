@@ -18,6 +18,9 @@ func (db *DB) LPush(key string, values ...[]byte) (int64, error) {
 	for _, value := range values {
 		lst.PushFront(value)
 	}
+	if ok {
+		db.touchKey(key)
+	}
 	return int64(lst.Len()), nil
 }
 
@@ -37,6 +40,9 @@ func (db *DB) RPush(key string, values ...[]byte) (int64, error) {
 	for _, value := range values {
 		lst.PushBack(value)
 	}
+	if ok {
+		db.touchKey(key)
+	}
 	return int64(lst.Len()), nil
 }
 
@@ -55,6 +61,8 @@ func (db *DB) LPop(key string) ([]byte, bool, error) {
 	}
 	if lst.Len() == 0 {
 		db.deleteKey(key)
+	} else {
+		db.touchKey(key)
 	}
 	return value, true, nil
 }
@@ -74,6 +82,8 @@ func (db *DB) RPop(key string) ([]byte, bool, error) {
 	}
 	if lst.Len() == 0 {
 		db.deleteKey(key)
+	} else {
+		db.touchKey(key)
 	}
 	return value, true, nil
 }
