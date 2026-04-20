@@ -423,3 +423,36 @@ func TestBitmap(t *testing.T) {
 	wantReply(t, reader, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
 
 }
+
+func TestTx(t *testing.T) {
+	t.Parallel()
+
+	conn, reader := newTestClient(t)
+
+	writeCmd(t, conn, "MULTI")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "SET", "a", "1")
+	wantReply(t, reader, "+QUEUED\r\n")
+
+	writeCmd(t, conn, "GET", "a")
+	wantReply(t, reader, "+QUEUED\r\n")
+
+	writeCmd(t, conn, "EXEC")
+	wantReply(t, reader, "*2\r\n+OK\r\n$1\r\n1\r\n")
+
+	writeCmd(t, conn, "GET", "a")
+	wantReply(t, reader, "$1\r\n1\r\n")
+
+	writeCmd(t, conn, "MULTI")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "SET", "b", "2")
+	wantReply(t, reader, "+QUEUED\r\n")
+
+	writeCmd(t, conn, "DISCARD")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "GET", "b")
+	wantReply(t, reader, "$-1\r\n")
+}

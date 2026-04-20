@@ -10,6 +10,8 @@ type Session struct {
 	RemoteAddr string
 	CreatedAt  time.Time
 	dbIndex    int
+	inMulti    bool
+	queued     [][][]byte
 }
 
 func NewSession(conn net.Conn) *Session {
@@ -26,4 +28,38 @@ func (s *Session) GetDBIndex() int {
 
 func (s *Session) SetDBIndex(index int) {
 	s.dbIndex = index
+}
+
+func (s *Session) InMulti() bool {
+	return s.inMulti
+}
+
+func (s *Session) StartMulti() bool {
+	if s.inMulti {
+		return false
+	}
+	s.inMulti = true
+	s.queued = nil
+	return true
+}
+
+func (s *Session) Queue(tokens [][]byte) {
+	s.queued = append(s.queued, cloneTokens(tokens))
+}
+
+func (s *Session) Queued() [][][]byte {
+	return s.queued
+}
+
+func (s *Session) ClearMulti() {
+	s.inMulti = false
+	s.queued = nil
+}
+
+func cloneTokens(tokens [][]byte) [][]byte {
+	out := make([][]byte, 0, len(tokens))
+	for _, token := range tokens {
+		out = append(out, append([]byte(nil), token...))
+	}
+	return out
 }

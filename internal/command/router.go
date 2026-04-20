@@ -13,6 +13,11 @@ import (
 type Session interface {
 	GetDBIndex() int
 	SetDBIndex(int)
+	InMulti() bool
+	StartMulti() bool
+	Queue([][]byte)
+	Queued() [][][]byte
+	ClearMulti()
 }
 
 type Executor struct {
@@ -22,7 +27,7 @@ type Executor struct {
 
 func NewExecutor(eng *engine.Engine) *Executor {
 	e := &Executor{
-		engine: eng,
+		engine:   eng,
 		commands: make(map[string]Meta),
 	}
 	e.registerBase()
@@ -67,7 +72,9 @@ func (e *Executor) registerBase() {
 	e.register("SETBIT", 3, 3, e.execSetBit)
 	e.register("GETBIT", 2, 2, e.execGetBit)
 	e.register("BITCOUNT", 1, 1, e.execBitCount)
-
+	e.register("MULTI", 0, 0, e.execMulti)
+	e.register("EXEC", 0, 0, e.execExec)
+	e.register("DISCARD", 0, 0, e.execDiscard)
 }
 
 func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
@@ -84,6 +91,15 @@ func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
 	args := tokens[1:]
 	if !meta.Match(len(args)) {
 		return wrongArity(strings.ToLower(name))
+	}
+
+	switch name {
+	case "MULTI", "EXEC", "DISCARD":
+		return meta.Exec(session, args)
+	}
+	if session.InMulti() {
+		session.Queue(tokens)
+		return resp.SimpleString("QUEUED")
 	}
 	return meta.Exec(session, args)
 }

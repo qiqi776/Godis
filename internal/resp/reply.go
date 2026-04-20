@@ -19,7 +19,7 @@ func BulkString(value []byte) []byte {
 }
 
 func Integer(value int64) []byte {
-    return []byte(":" + strconv.FormatInt(value, 10) + "\r\n")
+	return []byte(":" + strconv.FormatInt(value, 10) + "\r\n")
 }
 
 func NullBulkString() []byte {
@@ -33,6 +33,17 @@ func ArrayBulkStrings(values [][]byte) []byte {
 	builder.WriteString("\r\n")
 	for _, value := range values {
 		builder.Write(BulkString(value))
+	}
+	return []byte(builder.String())
+}
+
+func ArrayReplies(replies [][]byte) []byte {
+	var builder strings.Builder
+	builder.WriteString("*")
+	builder.WriteString(strconv.Itoa(len(replies)))
+	builder.WriteString("\r\n")
+	for _, reply := range replies {
+		builder.Write(reply)
 	}
 	return []byte(builder.String())
 }
