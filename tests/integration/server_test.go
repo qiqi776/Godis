@@ -523,3 +523,190 @@ func TestWatch(t *testing.T) {
         t.Fatal("server did not stop")
     }
 }
+
+func TestUnwatch(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Host:      "127.0.0.1",
+		Port:      0,
+		LogLevel:  "error",
+		Databases: 4,
+	}
+
+	eng := engine.New(cfg.Databases)
+	t.Cleanup(eng.Close)
+
+	exec := command.NewExecutor(eng)
+	srv := server.New(cfg, logger.NewDiscard(), exec)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Run(ctx)
+	}()
+
+	addr := waitAddr(t, srv)
+
+	conn1, err := net.Dial("tcp", addr)
+	if err != nil {
+		cancel()
+		t.Fatalf("dial first client: %v", err)
+	}
+	defer conn1.Close()
+	reader1 := bufio.NewReader(conn1)
+
+	conn2, err := net.Dial("tcp", addr)
+	if err != nil {
+		cancel()
+		t.Fatalf("dial second client: %v", err)
+	}
+	defer conn2.Close()
+	reader2 := bufio.NewReader(conn2)
+
+	writeCmd(t, conn1, "WATCH", "a")
+	wantReply(t, reader1, "+OK\r\n")
+
+	writeCmd(t, conn1, "UNWATCH")
+	wantReply(t, reader1, "+OK\r\n")
+
+	writeCmd(t, conn1, "MULTI")
+	wantReply(t, reader1, "+OK\r\n")
+
+	writeCmd(t, conn1, "GET", "a")
+	wantReply(t, reader1, "+QUEUED\r\n")
+
+	writeCmd(t, conn2, "SET", "a", "1")
+	wantReply(t, reader2, "+OK\r\n")
+
+	writeCmd(t, conn1, "EXEC")
+	wantReply(t, reader1, "*1\r\n$1\r\n1\r\n")
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
+func TestPubSub(t *testing.T) {
+    t.Parallel()
+
+    cfg := config.Config{
+        Host:      "127.0.0.1",
+        Port:      0,
+        LogLevel:  "error",
+        Databases: 4,
+    }
+
+    eng := engine.New(cfg.Databases)
+    t.Cleanup(eng.Close)
+
+    exec := command.NewExecutor(eng)
+    srv := server.New(cfg, logger.NewDiscard(), exec)
+
+    ctx, cancel := context.WithCancel(context.Background())
+    errCh := make(chan error, 1)
+    go func() {
+        errCh <- srv.Run(ctx)
+    }()
+
+    addr := waitAddr(t, srv)
+
+    subConn, err := net.Dial("tcp", addr)
+    if err != nil {
+        cancel()
+        t.Fatalf("dial subscriber: %v", err)
+    }
+    defer subConn.Close()
+    subReader := bufio.NewReader(subConn)
+
+    pubConn, err := net.Dial("tcp", addr)
+    if err != nil {
+        cancel()
+        t.Fatalf("dial publisher: %v", err)
+    }
+    defer pubConn.Close()
+    pubReader := bufio.NewReader(pubConn)
+
+    writeCmd(t, subConn, "SUBSCRIBE", "news")
+    wantReply(t, subReader, "*3\r\n$9\r\nsubscribe\r\n$4\r\nnews\r\n:1\r\n")
+
+    writeCmd(t, pubConn, "PUBLISH", "news", "hello")
+    wantReply(t, pubReader, ":1\r\n")
+    wantReply(t, subReader, "*3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$5\r\nhello\r\n")
+
+    writeCmd(t, subConn, "UNSUBSCRIBE", "news")
+    wantReply(t, subReader, "*3\r\n$11\r\nunsubscribe\r\n$4\r\nnews\r\n:0\r\n")
+
+    writeCmd(t, pubConn, "PUBLISH", "news", "again")
+    wantReply(t, pubReader, ":0\r\n")
+
+    cancel()
+
+    select {
+    case err := <-errCh:
+        if err != nil {
+            t.Fatalf("server shutdown: %v", err)
+        }
+    case <-time.After(2 * time.Second):
+        t.Fatal("server did not stop")
+    }
+}
+
+func TestUnsubscribeAll(t *testing.T) {
+    t.Parallel()
+
+    cfg := config.Config{
+        Host:      "127.0.0.1",
+        Port:      0,
+        LogLevel:  "error",
+        Databases: 4,
+    }
+
+    eng := engine.New(cfg.Databases)
+    t.Cleanup(eng.Close)
+
+    exec := command.NewExecutor(eng)
+    srv := server.New(cfg, logger.NewDiscard(), exec)
+
+    ctx, cancel := context.WithCancel(context.Background())
+    errCh := make(chan error, 1)
+    go func() {
+        errCh <- srv.Run(ctx)
+    }()
+
+    addr := waitAddr(t, srv)
+
+    conn, err := net.Dial("tcp", addr)
+    if err != nil {
+        cancel()
+        t.Fatalf("dial subscriber: %v", err)
+    }
+    defer conn.Close()
+    reader := bufio.NewReader(conn)
+
+    writeCmd(t, conn, "SUBSCRIBE", "a", "b")
+    wantReply(t, reader, "*3\r\n$9\r\nsubscribe\r\n$1\r\na\r\n:1\r\n")
+    wantReply(t, reader, "*3\r\n$9\r\nsubscribe\r\n$1\r\nb\r\n:2\r\n")
+
+    writeCmd(t, conn, "UNSUBSCRIBE")
+    wantReply(t, reader, "*3\r\n$11\r\nunsubscribe\r\n$1\r\na\r\n:1\r\n")
+    wantReply(t, reader, "*3\r\n$11\r\nunsubscribe\r\n$1\r\nb\r\n:0\r\n")
+
+    cancel()
+
+    select {
+    case err := <-errCh:
+        if err != nil {
+            t.Fatalf("server shutdown: %v", err)
+        }
+    case <-time.After(2 * time.Second):
+        t.Fatal("server did not stop")
+    }
+}

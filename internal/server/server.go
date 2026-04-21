@@ -15,6 +15,7 @@ type Server struct {
 	cfg      config.Config
 	logger   *logger.Logger
 	executor *command.Executor
+	ps  	 *PubSub
 	mu       sync.RWMutex
 	listener net.Listener
 	conns    map[net.Conn]struct{}
@@ -26,6 +27,7 @@ func New(cfg config.Config, l *logger.Logger, e *command.Executor) *Server {
 		cfg:      cfg,
 		logger:   l,
 		executor: e,
+		ps:   	  NewPubSub(),
 		conns:    make(map[net.Conn]struct{}),
 	}
 }

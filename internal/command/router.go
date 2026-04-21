@@ -79,6 +79,7 @@ func (e *Executor) registerBase() {
 	e.register("EXEC", 0, 0, e.execExec)
 	e.register("DISCARD", 0, 0, e.execDiscard)
 	e.register("WATCH", 1, -1, e.execWatch)
+	e.register("UNWATCH", 0, 0, e.execUnwatch)
 }
 
 func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
@@ -98,7 +99,7 @@ func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
 	}
 
 	switch name {
-	case "MULTI", "EXEC", "DISCARD", "WATCH":
+	case "MULTI", "EXEC", "DISCARD", "WATCH", "UNWATCH":
 		return meta.Exec(session, args)
 	}
 	if session.InMulti() {

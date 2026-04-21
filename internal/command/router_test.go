@@ -566,3 +566,54 @@ func TestWatchErr(t *testing.T) {
         t.Fatalf("unexpected WATCH error reply: %q", got)
     }
 }
+
+func TestUnwatch(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	s1 := &testSession{}
+	s2 := &testSession{}
+
+	if got := string(exec.Execute(s1, cmd("WATCH", "a"))); got != "+OK\r\n" {
+		t.Fatalf("unexpected WATCH reply: %q", got)
+	}
+
+	if got := string(exec.Execute(s1, cmd("UNWATCH"))); got != "+OK\r\n" {
+		t.Fatalf("unexpected UNWATCH reply: %q", got)
+	}
+
+	if got := string(exec.Execute(s1, cmd("MULTI"))); got != "+OK\r\n" {
+		t.Fatalf("unexpected MULTI reply: %q", got)
+	}
+
+	if got := string(exec.Execute(s1, cmd("GET", "a"))); got != "+QUEUED\r\n" {
+		t.Fatalf("unexpected queued GET reply: %q", got)
+	}
+
+	if got := string(exec.Execute(s2, cmd("SET", "a", "1"))); got != "+OK\r\n" {
+		t.Fatalf("unexpected SET reply from second session: %q", got)
+	}
+
+	if got := string(exec.Execute(s1, cmd("EXEC"))); got != "*1\r\n$1\r\n1\r\n" {
+		t.Fatalf("unexpected EXEC reply after UNWATCH: %q", got)
+	}
+}
+
+func TestUnwatchErr(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	if got := string(exec.Execute(sess, cmd("UNWATCH"))); got != "+OK\r\n" {
+		t.Fatalf("unexpected UNWATCH reply without watch: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("MULTI"))); got != "+OK\r\n" {
+		t.Fatalf("unexpected MULTI reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("UNWATCH"))); got != "-ERR UNWATCH inside MULTI is not allowed\r\n" {
+		t.Fatalf("unexpected UNWATCH error reply: %q", got)
+	}
+}

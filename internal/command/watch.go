@@ -20,6 +20,15 @@ func (e *Executor) execWatch(session Session, args [][]byte) []byte {
     return resp.SimpleString("OK")
 }
 
+func (e *Executor) execUnwatch(session Session, _ [][]byte) []byte {
+	if session.InMulti() {
+		return resp.Error("ERR UNWATCH inside MULTI is not allowed")
+	}
+
+	session.ClearWatch()
+	return resp.SimpleString("OK")
+}
+
 func (e *Executor) watchDirty(session Session) bool {
     for dbIndex, keys := range session.Watched() {
         db := e.engine.DB(dbIndex)
