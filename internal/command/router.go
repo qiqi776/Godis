@@ -80,6 +80,11 @@ func (e *Executor) registerBase() {
 	e.register("DISCARD", 0, 0, e.execDiscard)
 	e.register("WATCH", 1, -1, e.execWatch)
 	e.register("UNWATCH", 0, 0, e.execUnwatch)
+	e.register("TYPE", 1, 1, e.execType)
+	e.register("DBSIZE", 0, 0, e.execDBSize)
+	e.register("INFO", 0, 0, e.execInfo)
+	e.register("COMMAND", 0, 0, e.execCommand)
+
 }
 
 func (e *Executor) Execute(session Session, tokens [][]byte) []byte {

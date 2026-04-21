@@ -3,6 +3,7 @@ package integration
 import (
 	"bufio"
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -262,12 +263,17 @@ func readResp(t *testing.T, reader *bufio.Reader) string {
 		return line
 	}
 
-	body, err := reader.ReadString('\n')
+	size, err := strconv.Atoi(strings.TrimPrefix(sizeLine, "$"))
 	if err != nil {
+		t.Fatalf("parse bulk size: %v", err)
+	}
+
+	body := make([]byte, size+2)
+	if _, err := io.ReadFull(reader, body); err != nil {
 		t.Fatalf("read bulk body: %v", err)
 	}
 
-	return line + body
+	return line + string(body)
 }
 
 func TestList(t *testing.T) {
@@ -709,4 +715,43 @@ func TestUnsubscribeAll(t *testing.T) {
     case <-time.After(2 * time.Second):
         t.Fatal("server did not stop")
     }
+}
+
+func TestSystem(t *testing.T) {
+	t.Parallel()
+
+	conn, reader := newTestClient(t)
+
+	writeCmd(t, conn, "TYPE", "missing")
+	wantReply(t, reader, "+none\r\n")
+
+	writeCmd(t, conn, "SET", "a", "1")
+	wantReply(t, reader, "+OK\r\n")
+
+	writeCmd(t, conn, "TYPE", "a")
+	wantReply(t, reader, "+string\r\n")
+
+	writeCmd(t, conn, "DBSIZE")
+	wantReply(t, reader, ":1\r\n")
+
+	writeCmd(t, conn, "INFO")
+	info := readResp(t, reader)
+	if !strings.HasPrefix(info, "$") ||
+		!strings.Contains(info, "godis_version:0.1\r\n") ||
+		!strings.Contains(info, "mode:standalone\r\n") ||
+		!strings.Contains(info, "databases:4\r\n") ||
+		!strings.Contains(info, "db0:keys=1\r\n") {
+		t.Fatalf("unexpected INFO reply: %q", info)
+	}
+
+	writeCmd(t, conn, "COMMAND")
+	commands := readResp(t, reader)
+	if !strings.HasPrefix(commands, "*") ||
+		!strings.Contains(commands, "$4\r\ntype\r\n") ||
+		!strings.Contains(commands, "$6\r\ndbsize\r\n") ||
+		!strings.Contains(commands, "$4\r\ninfo\r\n") ||
+		!strings.Contains(commands, "$7\r\ncommand\r\n") ||
+		!strings.Contains(commands, "$9\r\nsubscribe\r\n") {
+		t.Fatalf("unexpected COMMAND reply: %q", commands)
+	}
 }

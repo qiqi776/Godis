@@ -617,3 +617,45 @@ func TestUnwatchErr(t *testing.T) {
 		t.Fatalf("unexpected UNWATCH error reply: %q", got)
 	}
 }
+
+func TestSystem(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(2))
+	sess := &testSession{}
+
+	if got := string(exec.Execute(sess, cmd("TYPE", "missing"))); got != "+none\r\n" {
+		t.Fatalf("unexpected TYPE missing reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("SET", "a", "1"))); got != "+OK\r\n" {
+		t.Fatalf("unexpected SET reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("TYPE", "a"))); got != "+string\r\n" {
+		t.Fatalf("unexpected TYPE string reply: %q", got)
+	}
+
+	if got := string(exec.Execute(sess, cmd("DBSIZE"))); got != ":1\r\n" {
+		t.Fatalf("unexpected DBSIZE reply: %q", got)
+	}
+
+	info := string(exec.Execute(sess, cmd("INFO")))
+	if !strings.HasPrefix(info, "$") ||
+		!strings.Contains(info, "godis_version:0.1\r\n") ||
+		!strings.Contains(info, "mode:standalone\r\n") ||
+		!strings.Contains(info, "databases:2\r\n") ||
+		!strings.Contains(info, "db0:keys=1\r\n") {
+		t.Fatalf("unexpected INFO reply: %q", info)
+	}
+
+	commands := string(exec.Execute(sess, cmd("COMMAND")))
+	if !strings.HasPrefix(commands, "*") ||
+		!strings.Contains(commands, "$4\r\ntype\r\n") ||
+		!strings.Contains(commands, "$6\r\ndbsize\r\n") ||
+		!strings.Contains(commands, "$4\r\ninfo\r\n") ||
+		!strings.Contains(commands, "$7\r\ncommand\r\n") ||
+		!strings.Contains(commands, "$9\r\nsubscribe\r\n") {
+		t.Fatalf("unexpected COMMAND reply: %q", commands)
+	}
+}
