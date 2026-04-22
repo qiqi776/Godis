@@ -3,22 +3,27 @@ package config
 import (
 	"fmt"
 	"os"
+
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Host 	  string `yaml:"host"`
-	Port 	  int 	 `yaml:"port"`
-	LogLevel  string `yaml:"log_level"`
-	Databases int    `yaml:"databases"`
+	Host       string `yaml:"host"`
+	Port       int    `yaml:"port"`
+	LogLevel   string `yaml:"log_level"`
+	Databases  int    `yaml:"databases"`
+	AOFEnabled bool   `yaml:"aof_enabled"`
+	AOFPath    string `yaml:"aof_path"`
 }
 
 func Default() Config {
 	return Config{
-		Host: 	   "127.0.0.1",
-		Port: 	   6380,
-		LogLevel:  "debug",
-		Databases: 16,
+		Host:       "127.0.0.1",
+		Port:       6380,
+		LogLevel:   "debug",
+		Databases:  16,
+		AOFEnabled: false,
+		AOFPath:    "appendonly.aof",
 	}
 }
 
@@ -45,6 +50,9 @@ func Load(path string) (Config, error) {
 
 	if cfg.Databases <= 0 {
 		cfg.Databases = Default().Databases
+	}
+	if cfg.AOFPath == "" {
+		cfg.AOFPath = Default().AOFPath
 	}
 	return cfg, nil
 }

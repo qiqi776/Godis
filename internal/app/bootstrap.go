@@ -15,6 +15,7 @@ type App struct {
 	Logger   *logger.Logger
 	Engine   *engine.Engine
 	Executor *command.Executor
+	AOF      *command.AOFLog
 	Server   *server.Server
 }
 
@@ -27,6 +28,20 @@ func Bootstrap(cfgPath string) (*App, error) {
 	l := logger.New(cfg.LogLevel)
 	eng := engine.New(cfg.Databases)
 	exec := command.NewExecutor(eng)
+
+	var aofLog *command.AOFLog
+	if cfg.AOFEnabled {
+		aofLog, err = command.OpenAOF(cfg.AOFPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := aofLog.Replay(exec); err != nil {
+			_ = aofLog.Close()
+			return nil, err
+		}
+		exec.SetAppender(aofLog)
+	}
+
 	srv := server.New(cfg, l, exec)
 
 	return &App{
@@ -34,11 +49,15 @@ func Bootstrap(cfgPath string) (*App, error) {
 		Logger:   l,
 		Engine:   eng,
 		Executor: exec,
+		AOF:      aofLog,
 		Server:   srv,
 	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
+	if a.AOF != nil {
+		defer a.AOF.Close()
+	}
 	defer a.Engine.Close()
 	return a.Server.Run(ctx)
 }

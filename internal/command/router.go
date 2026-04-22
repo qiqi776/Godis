@@ -18,14 +18,15 @@ type Session interface {
 	Queue([][]byte)
 	Queued() [][][]byte
 	ClearMulti()
-    Watch(int, string, uint64)
-    Watched() map[int]map[string]uint64
-    ClearWatch()
+	Watch(int, string, uint64)
+	Watched() map[int]map[string]uint64
+	ClearWatch()
 }
 
 type Executor struct {
 	engine   *engine.Engine
 	commands map[string]Meta
+	appender Appender
 }
 
 func NewExecutor(eng *engine.Engine) *Executor {
@@ -111,7 +112,15 @@ func (e *Executor) Execute(session Session, tokens [][]byte) []byte {
 		session.Queue(tokens)
 		return resp.SimpleString("QUEUED")
 	}
-	return meta.Exec(session, args)
+
+	reply := meta.Exec(session, args)
+	if e.appender != nil && isWriteCommand(name) && len(reply) > 0 && reply[0] != '-' {
+		if err := e.appender.Append(session.GetDBIndex(), tokens); err != nil {
+			return resp.Error("ERR append only file write failed")
+		}
+	}
+
+	return reply
 }
 
 func (e *Executor) execPing(_ Session, args [][]byte) []byte {
@@ -570,4 +579,3 @@ func (e *Executor) execBitCount(session Session, args [][]byte) []byte {
 	}
 	return resp.Integer(count)
 }
-
