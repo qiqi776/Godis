@@ -25,7 +25,8 @@ func TestAOFRecovery(t *testing.T) {
 		"log_level: error\n" +
 		"databases: 4\n" +
 		"aof_enabled: true\n" +
-		"aof_path: " + aofPath + "\n"
+		"aof_path: " + aofPath + "\n" +
+		"aof_fsync: always\n"
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

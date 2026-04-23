@@ -2,3 +2,6 @@ host: 127.0.0.1
 port: 6380
 log_level: debug
 databases: 16
+aof_enabled: false
+aof_path: appendonly.aof
+aof_fsync: everysec

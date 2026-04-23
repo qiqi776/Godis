@@ -31,7 +31,12 @@ func Bootstrap(cfgPath string) (*App, error) {
 
 	var aofLog *command.AOFLog
 	if cfg.AOFEnabled {
-		aofLog, err = command.OpenAOF(cfg.AOFPath)
+		fsyncPolicy, err := command.ParseFsyncPolicy(cfg.AOFFsync)
+		if err != nil {
+			return nil, err
+		}
+
+		aofLog, err = command.OpenAOF(cfg.AOFPath, fsyncPolicy)
 		if err != nil {
 			return nil, err
 		}

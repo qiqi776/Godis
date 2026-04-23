@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"godis/internal/engine"
 )
@@ -50,6 +51,133 @@ func TestAOFAppendEncodesDBSwitch(t *testing.T) {
 		"*3\r\n$3\r\nSET\r\n$1\r\nb\r\n$1\r\n2\r\n"
 	if string(data) != want {
 		t.Fatalf("unexpected aof content\nwant: %q\ngot:  %q", want, string(data))
+	}
+}
+
+func TestParseFsyncPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   string
+		want    FsyncPolicy
+		wantErr bool
+	}{
+		{name: "default", value: "", want: FsyncEverySec},
+		{name: "always", value: "always", want: FsyncAlways},
+		{name: "everysec", value: "everysec", want: FsyncEverySec},
+		{name: "no", value: "no", want: FsyncNo},
+		{name: "case insensitive", value: "ALWAYS", want: FsyncAlways},
+		{name: "invalid", value: "sometimes", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ParseFsyncPolicy(tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("unexpected policy: got=%q want=%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAOFFsyncAlways(t *testing.T) {
+	t.Parallel()
+
+	log, err := OpenAOF(filepath.Join(t.TempDir(), "appendonly.aof"), FsyncAlways)
+	if err != nil {
+		t.Fatalf("open aof: %v", err)
+	}
+	defer log.Close()
+
+	var syncs int
+	log.syncFile = func() error {
+		syncs++
+		return nil
+	}
+
+	if err := log.Append(0, cmd("SET", "a", "1")); err != nil {
+		t.Fatalf("append first command: %v", err)
+	}
+	if err := log.Append(0, cmd("SET", "b", "2")); err != nil {
+		t.Fatalf("append second command: %v", err)
+	}
+
+	if syncs != 2 {
+		t.Fatalf("unexpected sync count: %d", syncs)
+	}
+}
+
+func TestAOFFsyncEverySec(t *testing.T) {
+	t.Parallel()
+
+	log, err := OpenAOF(filepath.Join(t.TempDir(), "appendonly.aof"), FsyncEverySec)
+	if err != nil {
+		t.Fatalf("open aof: %v", err)
+	}
+	defer log.Close()
+
+	now := time.Unix(100, 0)
+	log.now = func() time.Time {
+		return now
+	}
+
+	var syncs int
+	log.syncFile = func() error {
+		syncs++
+		return nil
+	}
+
+	if err := log.Append(0, cmd("SET", "a", "1")); err != nil {
+		t.Fatalf("append first command: %v", err)
+	}
+	if err := log.Append(0, cmd("SET", "b", "2")); err != nil {
+		t.Fatalf("append second command: %v", err)
+	}
+	if syncs != 1 {
+		t.Fatalf("unexpected sync count before interval: %d", syncs)
+	}
+
+	now = now.Add(time.Second)
+	if err := log.Append(0, cmd("SET", "c", "3")); err != nil {
+		t.Fatalf("append third command: %v", err)
+	}
+	if syncs != 2 {
+		t.Fatalf("unexpected sync count after interval: %d", syncs)
+	}
+}
+
+func TestAOFFsyncNo(t *testing.T) {
+	t.Parallel()
+
+	log, err := OpenAOF(filepath.Join(t.TempDir(), "appendonly.aof"), FsyncNo)
+	if err != nil {
+		t.Fatalf("open aof: %v", err)
+	}
+	defer log.Close()
+
+	var syncs int
+	log.syncFile = func() error {
+		syncs++
+		return nil
+	}
+
+	if err := log.Append(0, cmd("SET", "a", "1")); err != nil {
+		t.Fatalf("append command: %v", err)
+	}
+	if syncs != 0 {
+		t.Fatalf("unexpected sync count: %d", syncs)
 	}
 }
 

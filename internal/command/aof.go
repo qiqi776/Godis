@@ -10,18 +10,48 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"godis/internal/resp"
 )
 
 type AOFLog struct {
-	mu     sync.Mutex
-	file   *os.File
-	lastDB int
-	hasDB  bool
+	mu       sync.Mutex
+	file     *os.File
+	policy   FsyncPolicy
+	syncFile func() error
+	now      func() time.Time
+	lastSync time.Time
+	lastDB   int
+	hasDB    bool
 }
 
-func OpenAOF(path string) (*AOFLog, error) {
+type FsyncPolicy string
+
+const (
+	FsyncAlways   FsyncPolicy = "always"
+	FsyncEverySec FsyncPolicy = "everysec"
+	FsyncNo       FsyncPolicy = "no"
+)
+
+func ParseFsyncPolicy(value string) (FsyncPolicy, error) {
+	if value == "" {
+		return FsyncEverySec, nil
+	}
+
+	switch FsyncPolicy(strings.ToLower(value)) {
+	case FsyncAlways:
+		return FsyncAlways, nil
+	case FsyncEverySec:
+		return FsyncEverySec, nil
+	case FsyncNo:
+		return FsyncNo, nil
+	default:
+		return "", fmt.Errorf("invalid aof fsync policy: %s", value)
+	}
+}
+
+func OpenAOF(path string, policies ...FsyncPolicy) (*AOFLog, error) {
 	if path == "" {
 		return nil, fmt.Errorf("aof path is empty")
 	}
@@ -38,7 +68,17 @@ func OpenAOF(path string) (*AOFLog, error) {
 		return nil, err
 	}
 
-	return &AOFLog{file: file}, nil
+	policy := FsyncEverySec
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+
+	return &AOFLog{
+		file:     file,
+		policy:   policy,
+		syncFile: file.Sync,
+		now:      time.Now,
+	}, nil
 }
 
 func (l *AOFLog) Append(dbIndex int, tokens [][]byte) error {
@@ -56,8 +96,11 @@ func (l *AOFLog) Append(dbIndex int, tokens [][]byte) error {
 		l.hasDB = true
 	}
 
-	_, err := l.file.Write(encodeCommand(tokens))
-	return err
+	if _, err := l.file.Write(encodeCommand(tokens)); err != nil {
+		return err
+	}
+
+	return l.fsyncLocked()
 }
 
 func (l *AOFLog) Replay(exec *Executor) error {
@@ -103,9 +146,42 @@ func (l *AOFLog) Close() error {
 		return nil
 	}
 
+	if l.policy != FsyncNo {
+		if err := l.syncLocked(); err != nil {
+			return err
+		}
+	}
+
 	err := l.file.Close()
 	l.file = nil
 	return err
+}
+
+func (l *AOFLog) fsyncLocked() error {
+	switch l.policy {
+	case FsyncAlways:
+		return l.syncLocked()
+	case FsyncEverySec:
+		now := l.now()
+		if l.lastSync.IsZero() || now.Sub(l.lastSync) >= time.Second {
+			if err := l.syncLocked(); err != nil {
+				return err
+			}
+			l.lastSync = now
+		}
+		return nil
+	case FsyncNo:
+		return nil
+	default:
+		return fmt.Errorf("invalid aof fsync policy: %s", l.policy)
+	}
+}
+
+func (l *AOFLog) syncLocked() error {
+	if l.syncFile == nil {
+		return nil
+	}
+	return l.syncFile()
 }
 
 func encodeCommand(tokens [][]byte) []byte {

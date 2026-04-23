@@ -14,6 +14,7 @@ type Config struct {
 	Databases  int    `yaml:"databases"`
 	AOFEnabled bool   `yaml:"aof_enabled"`
 	AOFPath    string `yaml:"aof_path"`
+	AOFFsync   string `yaml:"aof_fsync"`
 }
 
 func Default() Config {
@@ -24,6 +25,7 @@ func Default() Config {
 		Databases:  16,
 		AOFEnabled: false,
 		AOFPath:    "appendonly.aof",
+		AOFFsync:   "everysec",
 	}
 }
 
@@ -53,6 +55,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.AOFPath == "" {
 		cfg.AOFPath = Default().AOFPath
+	}
+	if cfg.AOFFsync == "" {
+		cfg.AOFFsync = Default().AOFFsync
 	}
 	return cfg, nil
 }
