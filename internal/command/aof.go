@@ -103,6 +103,69 @@ func (l *AOFLog) Append(dbIndex int, tokens [][]byte) error {
 	return l.fsyncLocked()
 }
 
+func (l *AOFLog) Rewrite(snapshot func() [][][]byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.file == nil {
+		return fmt.Errorf("aof is closed")
+	}
+
+	commands := snapshot()
+	name := l.file.Name()
+	tmpName := name + ".tmp"
+
+	tmp, err := os.OpenFile(tmpName, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+
+	for _, tokens := range commands {
+		if _, err := tmp.Write(encodeCommand(tokens)); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return err
+		}
+	}
+
+	if l.policy != FsyncNo {
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return err
+		}
+	}
+
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+
+	if err := l.file.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+
+	if err := os.Rename(tmpName, name); err != nil {
+		l.file = nil
+		_ = os.Remove(tmpName)
+		return err
+	}
+
+	file, err := os.OpenFile(name, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o644)
+	if err != nil {
+		l.file = nil
+		return err
+	}
+
+	l.file = file
+	l.syncFile = file.Sync
+	l.hasDB = false
+	l.lastDB = 0
+	l.lastSync = time.Time{}
+	return nil
+}
+
 func (l *AOFLog) Replay(exec *Executor) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

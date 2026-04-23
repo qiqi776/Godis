@@ -240,3 +240,148 @@ func TestAOFReplayRestoresState(t *testing.T) {
 		t.Fatalf("unexpected replayed list: %#v", values)
 	}
 }
+
+func TestAOFRewriteCompactsFile(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "appendonly.aof")
+	log, err := OpenAOF(path, FsyncAlways)
+	if err != nil {
+		t.Fatalf("open aof: %v", err)
+	}
+	defer log.Close()
+
+	if err := log.Append(0, cmd("SET", "a", "1")); err != nil {
+		t.Fatalf("append first command: %v", err)
+	}
+	if err := log.Append(0, cmd("SET", "a", "2")); err != nil {
+		t.Fatalf("append second command: %v", err)
+	}
+
+	if err := log.Rewrite(func() [][][]byte {
+		return [][][]byte{
+			cmd("SELECT", "0"),
+			cmd("SET", "a", "2"),
+		}
+	}); err != nil {
+		t.Fatalf("rewrite aof: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rewritten aof: %v", err)
+	}
+
+	want := "" +
+		"*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n" +
+		"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n2\r\n"
+	if string(data) != want {
+		t.Fatalf("unexpected rewritten aof\nwant: %q\ngot:  %q", want, string(data))
+	}
+
+	if err := log.Append(0, cmd("SET", "b", "3")); err != nil {
+		t.Fatalf("append after rewrite: %v", err)
+	}
+
+	if err := log.Close(); err != nil {
+		t.Fatalf("close aof: %v", err)
+	}
+
+	eng := engine.New(1)
+	exec := NewExecutor(eng)
+	replay, err := OpenAOF(path)
+	if err != nil {
+		t.Fatalf("re-open aof: %v", err)
+	}
+	defer replay.Close()
+
+	if err := replay.Replay(exec); err != nil {
+		t.Fatalf("replay rewritten aof: %v", err)
+	}
+
+	value, ok, err := eng.DB(0).Get("a")
+	if err != nil {
+		t.Fatalf("get a: %v", err)
+	}
+	if !ok || string(value) != "2" {
+		t.Fatalf("unexpected value for a: %q ok=%v", string(value), ok)
+	}
+
+	value, ok, err = eng.DB(0).Get("b")
+	if err != nil {
+		t.Fatalf("get b: %v", err)
+	}
+	if !ok || string(value) != "3" {
+		t.Fatalf("unexpected value for b: %q ok=%v", string(value), ok)
+	}
+}
+
+func TestBGRewriteAOF(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "appendonly.aof")
+
+	eng := engine.New(1)
+	exec := NewExecutor(eng)
+	log, err := OpenAOF(path, FsyncAlways)
+	if err != nil {
+		t.Fatalf("open aof: %v", err)
+	}
+	defer log.Close()
+
+	exec.SetAppender(log)
+	exec.SetRewriter(log)
+
+	sess := &testSession{}
+	exec.Execute(sess, cmd("SET", "a", "1"))
+	exec.Execute(sess, cmd("SET", "a", "2"))
+	exec.Execute(sess, cmd("DEL", "missing"))
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read before rewrite: %v", err)
+	}
+
+	if got := string(exec.Execute(sess, cmd("BGREWRITEAOF"))); got != "+OK\r\n" {
+		t.Fatalf("unexpected BGREWRITEAOF reply: %q", got)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after rewrite: %v", err)
+	}
+	if len(after) >= len(before) {
+		t.Fatalf("expected rewrite to compact file, before=%d after=%d", len(before), len(after))
+	}
+
+	eng2 := engine.New(1)
+	exec2 := NewExecutor(eng2)
+	replay, err := OpenAOF(path)
+	if err != nil {
+		t.Fatalf("re-open aof: %v", err)
+	}
+	defer replay.Close()
+
+	if err := replay.Replay(exec2); err != nil {
+		t.Fatalf("replay rewritten aof: %v", err)
+	}
+
+	value, ok, err := eng2.DB(0).Get("a")
+	if err != nil {
+		t.Fatalf("get a after replay: %v", err)
+	}
+	if !ok || string(value) != "2" {
+		t.Fatalf("unexpected replayed value: %q ok=%v", string(value), ok)
+	}
+}
+
+func TestBGRewriteAOFDisabled(t *testing.T) {
+	t.Parallel()
+
+	exec := NewExecutor(engine.New(1))
+	sess := &testSession{}
+
+	if got := string(exec.Execute(sess, cmd("BGREWRITEAOF"))); got != "-ERR AOF is not enabled\r\n" {
+		t.Fatalf("unexpected BGREWRITEAOF disabled reply: %q", got)
+	}
+}

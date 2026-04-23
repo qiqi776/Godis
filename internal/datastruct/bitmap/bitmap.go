@@ -70,6 +70,22 @@ func (b *Bitmap) Count() int64 {
 	return total
 }
 
+func (b *Bitmap) SetBits() []int64 {
+	out := make([]int64, 0, b.Count())
+	for byteIndex, item := range b.data {
+		if item == 0 {
+			continue
+		}
+		for bitIndex := 0; bitIndex < 8; bitIndex++ {
+			mask := byte(1 << (7 - bitIndex))
+			if item&mask != 0 {
+				out = append(out, int64(byteIndex*8+bitIndex))
+			}
+		}
+	}
+	return out
+}
+
 func (b *Bitmap) ensure(byteIndex int) {
 	if byteIndex < len(b.data) {
 		return

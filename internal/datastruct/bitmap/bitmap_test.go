@@ -52,3 +52,24 @@ func TestCount(t *testing.T) {
 		t.Fatalf("unexpected bitcount: %d", got)
 	}
 }
+
+func TestSetBits(t *testing.T) {
+	t.Parallel()
+
+	bm := New()
+	_, _ = bm.SetBit(0, 1)
+	_, _ = bm.SetBit(7, 1)
+	_, _ = bm.SetBit(9, 1)
+
+	got := bm.SetBits()
+	want := []int64{0, 7, 9}
+
+	if len(got) != len(want) {
+		t.Fatalf("unexpected set bits len: %d", len(got))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected set bit at %d: got=%d want=%d", i, got[i], want[i])
+		}
+	}
+}

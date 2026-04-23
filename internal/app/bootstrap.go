@@ -45,6 +45,7 @@ func Bootstrap(cfgPath string) (*App, error) {
 			return nil, err
 		}
 		exec.SetAppender(aofLog)
+		exec.SetRewriter(aofLog)
 	}
 
 	srv := server.New(cfg, l, exec)
