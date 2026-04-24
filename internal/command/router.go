@@ -28,6 +28,7 @@ type Executor struct {
 	commands map[string]Meta
 	appender Appender
 	rewriter Rewriter
+	dumper   Dumper
 }
 
 func NewExecutor(eng *engine.Engine) *Executor {
@@ -87,6 +88,8 @@ func (e *Executor) registerBase() {
 	e.register("INFO", 0, 0, e.execInfo)
 	e.register("COMMAND", 0, 0, e.execCommand)
 	e.register("BGREWRITEAOF", 0, 0, e.execBGRewriteAOF)
+	e.register("SAVE", 0, 0, e.execSave)
+	e.register("BGSAVE", 0, 0, e.execSave)
 
 }
 

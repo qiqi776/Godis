@@ -8,13 +8,16 @@ import (
 )
 
 type Config struct {
-	Host       string `yaml:"host"`
-	Port       int    `yaml:"port"`
-	LogLevel   string `yaml:"log_level"`
-	Databases  int    `yaml:"databases"`
-	AOFEnabled bool   `yaml:"aof_enabled"`
-	AOFPath    string `yaml:"aof_path"`
-	AOFFsync   string `yaml:"aof_fsync"`
+	Host              string `yaml:"host"`
+	Port              int    `yaml:"port"`
+	LogLevel          string `yaml:"log_level"`
+	Databases         int    `yaml:"databases"`
+	AOFEnabled        bool   `yaml:"aof_enabled"`
+	AOFPath           string `yaml:"aof_path"`
+	AOFFsync          string `yaml:"aof_fsync"`
+	AOFUseRDBPreamble bool   `yaml:"aof_use_rdb_preamble"`
+	RDBEnabled        bool   `yaml:"rdb_enabled"`
+	RDBPath           string `yaml:"rdb_path"`
 }
 
 func Default() Config {
@@ -26,6 +29,8 @@ func Default() Config {
 		AOFEnabled: false,
 		AOFPath:    "appendonly.aof",
 		AOFFsync:   "everysec",
+		RDBEnabled: false,
+		RDBPath:    "dump.rdb",
 	}
 }
 
@@ -58,6 +63,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.AOFFsync == "" {
 		cfg.AOFFsync = Default().AOFFsync
+	}
+	if cfg.RDBPath == "" {
+		cfg.RDBPath = Default().RDBPath
 	}
 	return cfg, nil
 }

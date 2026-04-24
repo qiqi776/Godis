@@ -16,6 +16,7 @@ type App struct {
 	Engine   *engine.Engine
 	Executor *command.Executor
 	AOF      *command.AOFLog
+	RDB      *command.RDBFile
 	Server   *server.Server
 }
 
@@ -29,6 +30,18 @@ func Bootstrap(cfgPath string) (*App, error) {
 	eng := engine.New(cfg.Databases)
 	exec := command.NewExecutor(eng)
 
+	var rdbFile *command.RDBFile
+	if cfg.RDBEnabled {
+		rdbFile, err = command.NewRDBFile(cfg.RDBPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := rdbFile.Load(exec); err != nil {
+			return nil, err
+		}
+		exec.SetDumper(rdbFile)
+	}
+
 	var aofLog *command.AOFLog
 	if cfg.AOFEnabled {
 		fsyncPolicy, err := command.ParseFsyncPolicy(cfg.AOFFsync)
@@ -36,7 +49,7 @@ func Bootstrap(cfgPath string) (*App, error) {
 			return nil, err
 		}
 
-		aofLog, err = command.OpenAOF(cfg.AOFPath, fsyncPolicy)
+		aofLog, err = command.OpenAOFWithPreamble(cfg.AOFPath, cfg.AOFUseRDBPreamble, fsyncPolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -56,6 +69,7 @@ func Bootstrap(cfgPath string) (*App, error) {
 		Engine:   eng,
 		Executor: exec,
 		AOF:      aofLog,
+		RDB:      rdbFile,
 		Server:   srv,
 	}, nil
 }

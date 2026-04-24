@@ -16,14 +16,15 @@ import (
 )
 
 type AOFLog struct {
-	mu       sync.Mutex
-	file     *os.File
-	policy   FsyncPolicy
-	syncFile func() error
-	now      func() time.Time
-	lastSync time.Time
-	lastDB   int
-	hasDB    bool
+	mu             sync.Mutex
+	file           *os.File
+	policy         FsyncPolicy
+	useRDBPreamble bool
+	syncFile       func() error
+	now            func() time.Time
+	lastSync       time.Time
+	lastDB         int
+	hasDB          bool
 }
 
 type FsyncPolicy string
@@ -52,6 +53,10 @@ func ParseFsyncPolicy(value string) (FsyncPolicy, error) {
 }
 
 func OpenAOF(path string, policies ...FsyncPolicy) (*AOFLog, error) {
+	return OpenAOFWithPreamble(path, false, policies...)
+}
+
+func OpenAOFWithPreamble(path string, useRDBPreamble bool, policies ...FsyncPolicy) (*AOFLog, error) {
 	if path == "" {
 		return nil, fmt.Errorf("aof path is empty")
 	}
@@ -74,10 +79,11 @@ func OpenAOF(path string, policies ...FsyncPolicy) (*AOFLog, error) {
 	}
 
 	return &AOFLog{
-		file:     file,
-		policy:   policy,
-		syncFile: file.Sync,
-		now:      time.Now,
+		file:           file,
+		policy:         policy,
+		useRDBPreamble: useRDBPreamble,
+		syncFile:       file.Sync,
+		now:            time.Now,
 	}, nil
 }
 
@@ -120,11 +126,19 @@ func (l *AOFLog) Rewrite(snapshot func() [][][]byte) error {
 		return err
 	}
 
-	for _, tokens := range commands {
-		if _, err := tmp.Write(encodeCommand(tokens)); err != nil {
+	if l.useRDBPreamble {
+		if err := writeRDBCommands(tmp, commands); err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmpName)
 			return err
+		}
+	} else {
+		for _, tokens := range commands {
+			if _, err := tmp.Write(encodeCommand(tokens)); err != nil {
+				_ = tmp.Close()
+				_ = os.Remove(tmpName)
+				return err
+			}
 		}
 	}
 
@@ -176,6 +190,9 @@ func (l *AOFLog) Replay(exec *Executor) error {
 
 	reader := bufio.NewReader(l.file)
 	session := &replaySession{}
+	if err := replayRDBPreamble(reader, exec, session); err != nil {
+		return err
+	}
 
 	for {
 		tokens, err := resp.ReadCommand(reader)

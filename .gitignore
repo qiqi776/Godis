@@ -33,3 +33,5 @@ tmp/
 
 # Local tooling metadata
 .codex
+# Generated planning docs
+docs/
