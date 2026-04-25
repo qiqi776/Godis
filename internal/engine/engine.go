@@ -6,7 +6,8 @@ import (
 )
 
 type Engine struct {
-	dbs []*DB
+	dbs  []*DB
+	hook MutationHook
 }
 
 type DB struct {
@@ -41,6 +42,20 @@ func (e *Engine) DB(index int) *DB {
 		return nil
 	}
 	return e.dbs[index]
+}
+
+func (e *Engine) SetMutationHook(hook MutationHook) {
+	e.hook = hook
+}
+
+func (e *Engine) emitMutation(dbIndex int, command [][]byte) error {
+	if e.hook == nil {
+		return nil
+	}
+	return e.hook.ApplyMutation(MutationEvent{
+		DBIndex: dbIndex,
+		Command: command,
+	})
 }
 
 func (db *DB) Del(keys ...string) int64 {

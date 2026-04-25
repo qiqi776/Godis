@@ -1,5 +1,7 @@
 package command
 
+import "godis/internal/engine"
+
 type Appender interface {
 	Append(dbIndex int, tokens [][]byte) error
 }
@@ -22,6 +24,10 @@ func (e *Executor) SetRewriter(rewriter Rewriter) {
 
 func (e *Executor) SetDumper(dumper Dumper) {
 	e.dumper = dumper
+}
+
+func (l *AOFLog) ApplyMutation(event engine.MutationEvent) error {
+	return l.Append(event.DBIndex, event.Command)
 }
 
 func isWriteCommand(name string) bool {

@@ -127,7 +127,7 @@ func (e *Executor) execSave(_ Session, _ [][]byte) []byte {
 	if e.dumper == nil {
 		return resp.Error("ERR RDB is not enabled")
 	}
-	if err := e.dumper.Dump(e.engine.AOFRewriteCommands); err != nil {
+	if err := e.dumper.Dump(e.engine.SnapshotCommands); err != nil {
 		return resp.Error("ERR RDB dump failed")
 	}
 	return resp.SimpleString("OK")
