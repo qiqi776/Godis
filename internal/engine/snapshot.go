@@ -15,9 +15,9 @@ type SnapshotCommandProvider interface {
 }
 
 type fsmSnapshot struct {
-	Version   int             `json:"version"`
-	DBCount   int             `json:"db_count"`
-	Databases []dbSnapshot    `json:"databases"`
+	Version   int          `json:"version"`
+	DBCount   int          `json:"db_count"`
+	Databases []dbSnapshot `json:"databases"`
 }
 
 type dbSnapshot struct {

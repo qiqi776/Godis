@@ -10,9 +10,9 @@ const (
 )
 
 type KVCommand struct {
-	Type 	  CommandType
-	Key  	  string
-	Value 	  []byte
+	Type      CommandType
+	Key       string
+	Value     []byte
 	ExpireAt  int64
 	ClientID  string
 	RequestID uint64
