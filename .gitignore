@@ -33,3 +33,8 @@ tmp/
 
 # Local tooling metadata
 .codex
+# Generated planning docs
+docs/
+# Local wal data
+data/
+.agents/

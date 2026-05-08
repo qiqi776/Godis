@@ -1,0 +1,17 @@
+host: 127.0.0.1
+port: 6380
+log_level: debug
+
+raft:
+  id: node1
+  peers: [node1, node2, node3]
+  listen_addr: 127.0.0.1:16380
+  peer_addrs:
+    node1: 127.0.0.1:16380
+    node2: 127.0.0.1:16381
+    node3: 127.0.0.1:16382
+  wal_path: data/raft-node1.wal
+  election_timeout_ms: 300
+  heartbeat_timeout_ms: 100
+  apply_buffer_size: 128
+  snapshot_threshold: 1024
