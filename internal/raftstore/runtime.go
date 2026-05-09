@@ -59,30 +59,41 @@ type applyResult struct {
 }
 
 type waiter struct {
-	mu        sync.Mutex
-	waiters   map[uint64][]chan applyResult
-	completed map[uint64]applyResult
+	mu      sync.Mutex
+	waiters map[uint64][]chan applyResult
 }
 
 func newWaiter() *waiter {
 	return &waiter{
-		waiters:   make(map[uint64][]chan applyResult),
-		completed: make(map[uint64]applyResult),
+		waiters: make(map[uint64][]chan applyResult),
 	}
 }
 
 func (w *waiter) wait(ctx context.Context, index uint64) (applyResult, error) {
-	w.mu.Lock()
-	if result, ok := w.completed[index]; ok {
-		delete(w.completed, index)
-		w.mu.Unlock()
-		return result, nil
-	}
-
 	ch := make(chan applyResult, 1)
+	w.mu.Lock()
 	w.waiters[index] = append(w.waiters[index], ch)
 	w.mu.Unlock()
 
+	return w.waitRegistered(ctx, index, ch)
+}
+
+func (w *waiter) waitForProposal(ctx context.Context, propose func() (uint64, error)) (applyResult, error) {
+	ch := make(chan applyResult, 1)
+
+	w.mu.Lock()
+	index, err := propose()
+	if err != nil {
+		w.mu.Unlock()
+		return applyResult{}, err
+	}
+	w.waiters[index] = append(w.waiters[index], ch)
+	w.mu.Unlock()
+
+	return w.waitRegistered(ctx, index, ch)
+}
+
+func (w *waiter) waitRegistered(ctx context.Context, index uint64, ch chan applyResult) (applyResult, error) {
 	select {
 	case result := <-ch:
 		return result, nil
@@ -96,7 +107,6 @@ func (w *waiter) notify(result applyResult) {
 	w.mu.Lock()
 	waiters := w.waiters[result.Index]
 	if len(waiters) == 0 {
-		w.completed[result.Index] = result
 		w.mu.Unlock()
 		return
 	}
@@ -178,15 +188,16 @@ func (s *Runtime) Propose(ctx context.Context, command kv.Command) (kv.ApplyResu
 		return kv.ApplyResult{}, err
 	}
 
-	index, err := s.node.Propose(ctx, data)
-	if err != nil {
-		if errors.Is(err, raft.ErrNotLeader) {
-			return kv.ApplyResult{}, NotLeaderError{LeaderID: s.node.LeaderID()}
+	applied, err := s.waiter.waitForProposal(ctx, func() (uint64, error) {
+		index, err := s.node.Propose(ctx, data)
+		if err != nil {
+			if errors.Is(err, raft.ErrNotLeader) {
+				return 0, NotLeaderError{LeaderID: s.node.LeaderID()}
+			}
+			return 0, err
 		}
-		return kv.ApplyResult{}, err
-	}
-
-	applied, err := s.waiter.wait(ctx, index)
+		return index, nil
+	})
 	if err != nil {
 		return kv.ApplyResult{}, err
 	}

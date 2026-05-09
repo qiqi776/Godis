@@ -23,6 +23,33 @@ type testNode struct {
 	storage *logstore.FileStorage
 }
 
+type stubNode struct {
+	leader   bool
+	leaderID string
+	propose  func(context.Context, []byte) (uint64, error)
+}
+
+func (n *stubNode) Start() error { return nil }
+
+func (n *stubNode) Stop() error { return nil }
+
+func (n *stubNode) Propose(ctx context.Context, data []byte) (uint64, error) {
+	if n.propose == nil {
+		return 0, raft.ErrNotLeader
+	}
+	return n.propose(ctx, data)
+}
+
+func (n *stubNode) ReadIndex(context.Context) (uint64, error) { return 0, nil }
+
+func (n *stubNode) Snapshot(uint64, []byte) error { return nil }
+
+func (n *stubNode) IsLeader() bool { return n.leader }
+
+func (n *stubNode) LeaderID() string { return n.leaderID }
+
+func (n *stubNode) ApplyCh() <-chan raft.ApplyMsg { return nil }
+
 func TestSingleNode(t *testing.T) {
 	nodes := newCluster(t, []string{"node1"})
 	node := waitLead(t, nodes, time.Second)
@@ -256,6 +283,55 @@ func TestApplySnap(t *testing.T) {
 	value, ok, err := target.Get("snap")
 	if err != nil || !ok || !bytes.Equal(value, []byte("value")) {
 		t.Fatalf("snapshot value = %q, ok=%v err=%v; want value, true, nil", value, ok, err)
+	}
+}
+
+func TestDropUnwaited(t *testing.T) {
+	w := newWaiter()
+	w.notify(applyResult{Index: 7, Data: []byte("late")})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := w.wait(ctx, 7)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("wait error = %v, want %v", err, context.DeadlineExceeded)
+	}
+}
+
+func TestFastPropose(t *testing.T) {
+	store := mem.NewMemoryStore()
+	node := &stubNode{leader: true, leaderID: "node1"}
+	rt := New(store, node)
+
+	node.propose = func(ctx context.Context, data []byte) (uint64, error) {
+		go rt.applyMessage(raft.ApplyMsg{
+			Index: 1,
+			Term:  1,
+			Type:  raft.EntryNormal,
+			Data:  append([]byte(nil), data...),
+		})
+		return 1, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	result, err := rt.Propose(ctx, kv.Command{
+		Type:  kv.CommandPut,
+		Key:   "fast",
+		Value: []byte("value"),
+	})
+	if err != nil {
+		t.Fatalf("propose error: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("apply result error: %s", result.Error)
+	}
+
+	value, ok, err := store.Get("fast")
+	if err != nil || !ok || !bytes.Equal(value, []byte("value")) {
+		t.Fatalf("store value = %q, ok=%v err=%v; want value, true, nil", value, ok, err)
 	}
 }
 
