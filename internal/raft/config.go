@@ -25,6 +25,23 @@ func (c Config) validate() error {
 	if len(c.Peers) == 0 {
 		return ErrInvalidConfig
 	}
+	seen := make(map[string]struct{}, len(c.Peers))
+	hasSelf := false
+	for _, peer := range c.Peers {
+		if peer == "" {
+			return ErrInvalidConfig
+		}
+		if _, ok := seen[peer]; ok {
+			return ErrInvalidConfig
+		}
+		seen[peer] = struct{}{}
+		if peer == c.ID {
+			hasSelf = true
+		}
+	}
+	if !hasSelf {
+		return ErrInvalidConfig
+	}
 	if c.ElectionTimeout <= 0 {
 		return ErrInvalidConfig
 	}
@@ -39,13 +56,4 @@ func (c Config) validate() error {
 
 func (c Config) quorum() int {
 	return len(c.Peers)/2 + 1
-}
-
-func containsPeer(peers []string, id string) bool {
-	for _, peer := range peers {
-		if peer == id {
-			return true
-		}
-	}
-	return false
 }
