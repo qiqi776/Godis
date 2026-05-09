@@ -10,7 +10,7 @@ import (
 	"mini-kv/internal/raft/logstore"
 )
 
-func TestTransportRoundTrip(t *testing.T) {
+func TestRoundTrip(t *testing.T) {
 	handler := &stubHandler{}
 	server, err := New("node1", "127.0.0.1:0", nil)
 	if err != nil {
@@ -40,7 +40,7 @@ func TestTransportRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRealTransportCluster(t *testing.T) {
+func TestCluster(t *testing.T) {
 	ids := []string{"node1", "node2", "node3"}
 	transports := make(map[string]*Transport, len(ids))
 	nodes := make(map[string]raft.Node, len(ids))
@@ -93,7 +93,7 @@ func TestRealTransportCluster(t *testing.T) {
 		}
 	}()
 
-	leaderID := waitNetLeader(t, nodes, 2*time.Second)
+	leaderID := waitLead(t, nodes, 2*time.Second)
 	index, err := nodes[leaderID].Propose(context.Background(), []byte("net-cmd"))
 	if err != nil {
 		t.Fatalf("propose: %v", err)
@@ -103,7 +103,7 @@ func TestRealTransportCluster(t *testing.T) {
 	}
 
 	for id, node := range nodes {
-		msg := waitNetApply(t, node.ApplyCh(), []byte("net-cmd"), 2*time.Second)
+		msg := waitMsg(t, node.ApplyCh(), []byte("net-cmd"), 2*time.Second)
 		if msg.Index != index {
 			t.Fatalf("node=%s index=%d want=%d", id, msg.Index, index)
 		}
@@ -124,7 +124,7 @@ func (s *stubHandler) HandleInstallSnapshot(ctx context.Context, req raft.Instal
 	return raft.InstallSnapshotResponse{Term: req.Term}, nil
 }
 
-func waitNetLeader(t *testing.T, nodes map[string]raft.Node, timeout time.Duration) string {
+func waitLead(t *testing.T, nodes map[string]raft.Node, timeout time.Duration) string {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -146,7 +146,7 @@ func waitNetLeader(t *testing.T, nodes map[string]raft.Node, timeout time.Durati
 	return ""
 }
 
-func waitNetApply(t *testing.T, ch <-chan raft.ApplyMsg, data []byte, timeout time.Duration) raft.ApplyMsg {
+func waitMsg(t *testing.T, ch <-chan raft.ApplyMsg, data []byte, timeout time.Duration) raft.ApplyMsg {
 	t.Helper()
 
 	timer := time.NewTimer(timeout)

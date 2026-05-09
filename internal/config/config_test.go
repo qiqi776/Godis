@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestLoadConfig(t *testing.T) {
+func TestLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mini-kv.yaml")
 	data := []byte("port: 0\nraft:\n  id: node2\n")
 	if err := os.WriteFile(path, data, 0o644); err != nil {

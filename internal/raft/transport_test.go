@@ -2,6 +2,7 @@ package raft_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,21 +10,21 @@ import (
 	"mini-kv/internal/raft/logstore"
 )
 
-func TestReadIndexRejectsIsolatedLeader(t *testing.T) {
-	network := newPartitionNetwork()
-	nodes := newPartitionNodes(t, network, []string{"node1", "node2", "node3"})
+func TestReadIndexIsolated(t *testing.T) {
+	net := newNet()
+	nodes := newNodes(t, net, []string{"node1", "node2", "node3"})
 
-	startPartitionNodes(t, nodes)
-	defer stopPartitionNodes(nodes)
+	startNodes(t, nodes)
+	defer stopNodes(nodes)
 
-	leaderID := waitLeaderFromMap(t, nodes, time.Second)
+	leaderID := waitLeadMap(t, nodes, time.Second)
 	if leaderID == "" {
 		t.Fatalf("leader should be elected")
 	}
 
-	network.isolate(leaderID)
+	net.cut(leaderID)
 
-	newLeaderID := waitLeaderExcept(t, nodes, leaderID, 2*time.Second)
+	newLeaderID := waitOtherLead(t, nodes, leaderID, 2*time.Second)
 	if newLeaderID == "" {
 		t.Fatalf("majority side should elect new leader")
 	}
@@ -36,14 +37,14 @@ func TestReadIndexRejectsIsolatedLeader(t *testing.T) {
 	}
 }
 
-func TestLeaderReadIndexAfterNoop(t *testing.T) {
-	network := newPartitionNetwork()
-	nodes := newPartitionNodes(t, network, []string{"node1", "node2", "node3"})
+func TestReadIndexReady(t *testing.T) {
+	net := newNet()
+	nodes := newNodes(t, net, []string{"node1", "node2", "node3"})
 
-	startPartitionNodes(t, nodes)
-	defer stopPartitionNodes(nodes)
+	startNodes(t, nodes)
+	defer stopNodes(nodes)
 
-	leaderID := waitLeaderFromMap(t, nodes, time.Second)
+	leaderID := waitLeadMap(t, nodes, time.Second)
 	if leaderID == "" {
 		t.Fatalf("leader should be elected")
 	}
@@ -60,7 +61,7 @@ func TestLeaderReadIndexAfterNoop(t *testing.T) {
 	}
 }
 
-func TestVoteRejectsStaleLog(t *testing.T) {
+func TestVoteStale(t *testing.T) {
 	storage := logstore.NewMemoryStorage()
 	if err := storage.Append([]raft.LogEntry{
 		{Index: 1, Term: 2, Type: raft.EntryNormal, Data: []byte("newer")},
@@ -96,7 +97,7 @@ func TestVoteRejectsStaleLog(t *testing.T) {
 	}
 }
 
-func TestLogConflictReplacement(t *testing.T) {
+func TestConflictReplace(t *testing.T) {
 	storage := logstore.NewMemoryStorage()
 	if err := storage.Append([]raft.LogEntry{
 		{Index: 1, Term: 1, Type: raft.EntryNormal, Data: []byte("a")},
@@ -146,6 +147,7 @@ func TestLogConflictReplacement(t *testing.T) {
 }
 
 type partitionNetwork struct {
+	mu       sync.RWMutex
 	handlers map[string]raft.RPCHandler
 	blocked  map[partitionLink]struct{}
 }
@@ -155,22 +157,26 @@ type partitionLink struct {
 	to   string
 }
 
-func newPartitionNetwork() *partitionNetwork {
+func newNet() *partitionNetwork {
 	return &partitionNetwork{
 		handlers: make(map[string]raft.RPCHandler),
 		blocked:  make(map[partitionLink]struct{}),
 	}
 }
 
-func (n *partitionNetwork) transport(id string) raft.Transport {
+func (n *partitionNetwork) tr(id string) raft.Transport {
 	return &partitionTransport{from: id, network: n}
 }
 
-func (n *partitionNetwork) register(id string, handler raft.RPCHandler) {
+func (n *partitionNetwork) add(id string, handler raft.RPCHandler) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.handlers[id] = handler
 }
 
-func (n *partitionNetwork) isolate(id string) {
+func (n *partitionNetwork) cut(id string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	for peer := range n.handlers {
 		if peer == id {
 			continue
@@ -180,7 +186,9 @@ func (n *partitionNetwork) isolate(id string) {
 	}
 }
 
-func (n *partitionNetwork) handler(from string, to string) (raft.RPCHandler, error) {
+func (n *partitionNetwork) get(from string, to string) (raft.RPCHandler, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 	if _, ok := n.blocked[partitionLink{from: from, to: to}]; ok {
 		return nil, raft.ErrNodeStopped
 	}
@@ -197,7 +205,7 @@ type partitionTransport struct {
 }
 
 func (t *partitionTransport) RequestVote(ctx context.Context, target string, req raft.RequestVoteRequest) (raft.RequestVoteResponse, error) {
-	handler, err := t.network.handler(t.from, target)
+	handler, err := t.network.get(t.from, target)
 	if err != nil {
 		return raft.RequestVoteResponse{}, err
 	}
@@ -205,7 +213,7 @@ func (t *partitionTransport) RequestVote(ctx context.Context, target string, req
 }
 
 func (t *partitionTransport) AppendEntries(ctx context.Context, target string, req raft.AppendEntriesRequest) (raft.AppendEntriesResponse, error) {
-	handler, err := t.network.handler(t.from, target)
+	handler, err := t.network.get(t.from, target)
 	if err != nil {
 		return raft.AppendEntriesResponse{}, err
 	}
@@ -213,14 +221,14 @@ func (t *partitionTransport) AppendEntries(ctx context.Context, target string, r
 }
 
 func (t *partitionTransport) InstallSnapshot(ctx context.Context, target string, req raft.InstallSnapshotRequest) (raft.InstallSnapshotResponse, error) {
-	handler, err := t.network.handler(t.from, target)
+	handler, err := t.network.get(t.from, target)
 	if err != nil {
 		return raft.InstallSnapshotResponse{}, err
 	}
 	return handler.HandleInstallSnapshot(ctx, req)
 }
 
-func newPartitionNodes(t *testing.T, network *partitionNetwork, ids []string) map[string]raft.Node {
+func newNodes(t *testing.T, net *partitionNetwork, ids []string) map[string]raft.Node {
 	t.Helper()
 
 	nodes := make(map[string]raft.Node, len(ids))
@@ -229,7 +237,7 @@ func newPartitionNodes(t *testing.T, network *partitionNetwork, ids []string) ma
 			ID:               id,
 			Peers:            ids,
 			Storage:          logstore.NewMemoryStorage(),
-			Transport:        network.transport(id),
+			Transport:        net.tr(id),
 			ElectionTimeout:  80 * time.Millisecond,
 			HeartbeatTimeout: 20 * time.Millisecond,
 			ApplyBufferSize:  16,
@@ -237,13 +245,13 @@ func newPartitionNodes(t *testing.T, network *partitionNetwork, ids []string) ma
 		if err != nil {
 			t.Fatalf("new node %s: %v", id, err)
 		}
-		network.register(id, node.(raft.RPCHandler))
+		net.add(id, node.(raft.RPCHandler))
 		nodes[id] = node
 	}
 	return nodes
 }
 
-func startPartitionNodes(t *testing.T, nodes map[string]raft.Node) {
+func startNodes(t *testing.T, nodes map[string]raft.Node) {
 	t.Helper()
 	for _, node := range nodes {
 		if err := node.Start(); err != nil {
@@ -252,13 +260,13 @@ func startPartitionNodes(t *testing.T, nodes map[string]raft.Node) {
 	}
 }
 
-func stopPartitionNodes(nodes map[string]raft.Node) {
+func stopNodes(nodes map[string]raft.Node) {
 	for _, node := range nodes {
 		_ = node.Stop()
 	}
 }
 
-func waitLeaderExcept(t *testing.T, nodes map[string]raft.Node, excluded string, timeout time.Duration) string {
+func waitOtherLead(t *testing.T, nodes map[string]raft.Node, excluded string, timeout time.Duration) string {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)

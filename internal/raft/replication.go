@@ -5,6 +5,7 @@ import (
 	"sort"
 )
 
+// 向所有节点发送心跳/日志复制
 func (r *raftNode) replicateAll() {
 	r.mu.RLock()
 	if r.stopped || r.state != Leader {
@@ -179,6 +180,7 @@ func (r *raftNode) handleInstallSnapshotSuccess(peer string, req InstallSnapshot
 	r.nextIndex[peer] = req.LastIncludedIndex + 1
 }
 
+// 检查是否有新日志可以在当前 Term 提交，更新 commitIndex 并将已提交日志应用到状态机
 func (r *raftNode) advanceCommitIndex() {
 	indexes := make([]uint64, 0, len(r.peers))
 	for _, peer := range r.peers {

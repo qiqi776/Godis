@@ -157,6 +157,7 @@ func (r *raftNode) Propose(ctx context.Context, data []byte) (uint64, error) {
 	return entry.Index, nil
 }
 
+// 作为 Leader 节点向本地日志追加一条新条目
 func (r *raftNode) appendEntry(entryType EntryType, data []byte) (LogEntry, error) {
 	lastIndex, err := r.storage.LastIndex()
 	if err != nil {

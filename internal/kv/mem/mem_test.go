@@ -8,7 +8,7 @@ import (
 	"mini-kv/internal/kv"
 )
 
-func TestMemoryStoreApply(t *testing.T) {
+func TestApply(t *testing.T) {
 	t.Parallel()
 
 	store := NewMemoryStore()
@@ -30,7 +30,7 @@ func TestMemoryStoreApply(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreSnapshotRestore(t *testing.T) {
+func TestRestore(t *testing.T) {
 	t.Parallel()
 
 	store := NewMemoryStore()
@@ -57,7 +57,7 @@ func TestMemoryStoreSnapshotRestore(t *testing.T) {
 	}
 }
 
-func TestDedupSnap(t *testing.T) {
+func TestDedup(t *testing.T) {
 	t.Parallel()
 
 	store := NewMemoryStore()
@@ -94,7 +94,7 @@ func TestDedupSnap(t *testing.T) {
 	}
 }
 
-func TestLegacySnap(t *testing.T) {
+func TestLegacy(t *testing.T) {
 	t.Parallel()
 
 	data, err := json.Marshal(snapshot{
@@ -118,7 +118,7 @@ func TestLegacySnap(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreRestoreInvalid(t *testing.T) {
+func TestBadRestore(t *testing.T) {
 	t.Parallel()
 
 	store := NewMemoryStore()

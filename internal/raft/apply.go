@@ -1,5 +1,6 @@
 package raft
 
+// 日志应用
 func (r *raftNode) applyLoop() {
 	for {
 		select {
@@ -11,6 +12,7 @@ func (r *raftNode) applyLoop() {
 	}
 }
 
+// 应用已提交日志
 func (r *raftNode) applyCommitEntries() {
 	for {
 		r.mu.Lock()
@@ -22,6 +24,7 @@ func (r *raftNode) applyCommitEntries() {
 		nextIndex := r.lastApplied + 1
 		r.mu.Unlock()
 
+		// 读取日志条目并处理快照压缩
 		entries, err := r.storage.Entries(nextIndex, nextIndex+1)
 		if err == ErrCompacted {
 			snapshot, snapshotErr := r.storage.LoadSnapshot()
@@ -60,6 +63,7 @@ func (r *raftNode) applyCommitEntries() {
 	}
 }
 
+// 推送快照给应用层
 func (r *raftNode) publishSnapshot(snapshot Snapshot) {
 	msg := ApplyMsg{
 		Index:        snapshot.Index,

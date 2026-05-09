@@ -9,7 +9,7 @@ import (
 	"mini-kv/internal/raft"
 )
 
-func TestFileStoragePersist(t *testing.T) {
+func TestPersist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "raft.wal")
 
 	storage, err := OpenFileStorage(path)
@@ -75,7 +75,7 @@ func TestFileStoragePersist(t *testing.T) {
 	}
 }
 
-func TestFileStorageTruncate(t *testing.T) {
+func TestTruncate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "raft.wal")
 
 	storage, err := OpenFileStorage(path)
@@ -136,7 +136,7 @@ func TestFileStorageTruncate(t *testing.T) {
 	}
 }
 
-func TestFileStorageSnapshot(t *testing.T) {
+func TestSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "raft.wal")
 
 	storage, err := OpenFileStorage(path)
@@ -207,7 +207,7 @@ func TestFileStorageSnapshot(t *testing.T) {
 	}
 }
 
-func TestFileStorageApplySnapshot(t *testing.T) {
+func TestApplySnap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "raft.wal")
 
 	storage, err := OpenFileStorage(path)
@@ -254,7 +254,7 @@ func TestFileStorageApplySnapshot(t *testing.T) {
 	}
 }
 
-func TestNodeRestartApply(t *testing.T) {
+func TestRestartApply(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "raft.wal")
 
 	storage, err := OpenFileStorage(path)
@@ -315,7 +315,7 @@ func TestNodeRestartApply(t *testing.T) {
 	}
 }
 
-func TestNodeRestartVote(t *testing.T) {
+func TestRestartVote(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "raft.wal")
 
 	storage, err := OpenFileStorage(path)

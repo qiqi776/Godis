@@ -23,9 +23,9 @@ type testNode struct {
 	storage *logstore.FileStorage
 }
 
-func TestSingleNodeCommands(t *testing.T) {
-	nodes := newTestCluster(t, []string{"node1"})
-	node := waitForLeader(t, nodes, time.Second)
+func TestSingleNode(t *testing.T) {
+	nodes := newCluster(t, []string{"node1"})
+	node := waitLead(t, nodes, time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -59,9 +59,9 @@ func TestSingleNodeCommands(t *testing.T) {
 	}
 }
 
-func TestLeaderReplication(t *testing.T) {
-	nodes := newTestCluster(t, []string{"node1", "node2", "node3"})
-	leader := waitForLeader(t, nodes, time.Second)
+func TestReplicate(t *testing.T) {
+	nodes := newCluster(t, []string{"node1", "node2", "node3"})
+	leader := waitLead(t, nodes, time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -70,12 +70,12 @@ func TestLeaderReplication(t *testing.T) {
 		t.Fatalf("set error: %v", err)
 	}
 
-	waitForAllStores(t, nodes, "shared", []byte("value"), time.Second)
+	waitStores(t, nodes, "shared", []byte("value"), time.Second)
 }
 
-func TestFollowerRejectsCommands(t *testing.T) {
-	nodes := newTestCluster(t, []string{"node1", "node2", "node3"})
-	leader := waitForLeader(t, nodes, time.Second)
+func TestRejectCmd(t *testing.T) {
+	nodes := newCluster(t, []string{"node1", "node2", "node3"})
+	leader := waitLead(t, nodes, time.Second)
 
 	var follower *testNode
 	for _, node := range nodes {
@@ -92,15 +92,15 @@ func TestFollowerRejectsCommands(t *testing.T) {
 	defer cancel()
 
 	err := follower.kv.Set(ctx, "key", []byte("value"))
-	assertNotLeader(t, err)
+	assertLeaderErr(t, err)
 
 	_, _, err = follower.kv.Get(context.Background(), "key")
-	assertNotLeader(t, err)
+	assertLeaderErr(t, err)
 }
 
-func TestRestartReplayKV(t *testing.T) {
-	cluster := newPersistentTestCluster(t, []string{"node1"})
-	node := waitForLeader(t, cluster.nodes, time.Second)
+func TestReplayKV(t *testing.T) {
+	cluster := newPersistCluster(t, []string{"node1"})
+	node := waitLead(t, cluster.nodes, time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -122,9 +122,9 @@ func TestRestartReplayKV(t *testing.T) {
 		t.Fatalf("set tail: %v", err)
 	}
 
-	restarted := cluster.restartNode(t, 0)
-	_ = waitForLeader(t, cluster.nodes, time.Second)
-	waitForEngineValue(t, restarted, "tail", []byte("done"), time.Second)
+	restarted := cluster.restart(t, 0)
+	_ = waitLead(t, cluster.nodes, time.Second)
+	waitValue(t, restarted, "tail", []byte("done"), time.Second)
 
 	value, ok, err := restarted.kv.Get(context.Background(), "stable")
 	if err != nil {
@@ -143,9 +143,9 @@ func TestRestartReplayKV(t *testing.T) {
 	}
 }
 
-func TestFollowerRestartCatchup(t *testing.T) {
-	cluster := newPersistentTestCluster(t, []string{"node1", "node2", "node3"})
-	leader := waitForLeader(t, cluster.nodes, time.Second)
+func TestCatchup(t *testing.T) {
+	cluster := newPersistCluster(t, []string{"node1", "node2", "node3"})
+	leader := waitLead(t, cluster.nodes, time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -153,7 +153,7 @@ func TestFollowerRestartCatchup(t *testing.T) {
 	if err := leader.kv.Set(ctx, "before", []byte("restart")); err != nil {
 		t.Fatalf("set before: %v", err)
 	}
-	waitForAllStores(t, cluster.nodes, "before", []byte("restart"), time.Second)
+	waitStores(t, cluster.nodes, "before", []byte("restart"), time.Second)
 
 	followerIndex := -1
 	for i, node := range cluster.nodes {
@@ -167,30 +167,30 @@ func TestFollowerRestartCatchup(t *testing.T) {
 	}
 
 	stoppedID := cluster.nodes[followerIndex].id
-	cluster.stopNode(t, followerIndex)
+	cluster.stop(t, followerIndex)
 
 	if err := leader.kv.Set(ctx, "while-down", []byte("committed")); err != nil {
 		t.Fatalf("set while-down: %v", err)
 	}
 
-	restarted := cluster.restartNode(t, followerIndex)
+	restarted := cluster.restart(t, followerIndex)
 	if restarted.id != stoppedID {
 		t.Fatalf("restarted id = %s, want %s", restarted.id, stoppedID)
 	}
 
-	waitForEngineValue(t, restarted, "before", []byte("restart"), time.Second)
-	waitForEngineValue(t, restarted, "while-down", []byte("committed"), time.Second)
+	waitValue(t, restarted, "before", []byte("restart"), time.Second)
+	waitValue(t, restarted, "while-down", []byte("committed"), time.Second)
 
-	currentLeader := waitForLeader(t, cluster.nodes, time.Second)
+	currentLeader := waitLead(t, cluster.nodes, time.Second)
 	if err := currentLeader.kv.Set(ctx, "after", []byte("restart")); err != nil {
 		t.Fatalf("set after restart: %v", err)
 	}
-	waitForAllStores(t, cluster.nodes, "after", []byte("restart"), time.Second)
+	waitStores(t, cluster.nodes, "after", []byte("restart"), time.Second)
 }
 
-func TestLaggingFollowerInstallSnapshot(t *testing.T) {
-	cluster := newPersistentTestClusterWithSnapshotThreshold(t, []string{"node1", "node2", "node3"}, 2)
-	leader := waitForLeader(t, cluster.nodes, time.Second)
+func TestLaggingSnap(t *testing.T) {
+	cluster := newPersistClusterWithSnap(t, []string{"node1", "node2", "node3"}, 2)
+	leader := waitLead(t, cluster.nodes, time.Second)
 
 	followerIndex := -1
 	for i, node := range cluster.nodes {
@@ -204,7 +204,7 @@ func TestLaggingFollowerInstallSnapshot(t *testing.T) {
 	}
 
 	stoppedID := cluster.nodes[followerIndex].id
-	cluster.stopNode(t, followerIndex)
+	cluster.stop(t, followerIndex)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -217,18 +217,18 @@ func TestLaggingFollowerInstallSnapshot(t *testing.T) {
 		}
 	}
 
-	waitForSnapshot(t, leader.storage, time.Second)
+	waitSnap(t, leader.storage, time.Second)
 
-	restarted := cluster.restartNode(t, followerIndex)
+	restarted := cluster.restart(t, followerIndex)
 	if restarted.id != stoppedID {
 		t.Fatalf("restarted id = %s, want %s", restarted.id, stoppedID)
 	}
 
-	waitForEngineValue(t, restarted, "snap:5", []byte("value:5"), time.Second)
-	waitForSnapshot(t, restarted.storage, time.Second)
+	waitValue(t, restarted, "snap:5", []byte("value:5"), time.Second)
+	waitSnap(t, restarted.storage, time.Second)
 }
 
-func TestSnapApply(t *testing.T) {
+func TestApplySnap(t *testing.T) {
 	source := mem.NewMemoryStore()
 	if result := source.Apply(kv.Command{Type: kv.CommandPut, Key: "snap", Value: []byte("value")}); result.Error != "" {
 		t.Fatalf("apply source: %s", result.Error)
@@ -259,7 +259,7 @@ func TestSnapApply(t *testing.T) {
 	}
 }
 
-func newTestCluster(t *testing.T, ids []string) []*testNode {
+func newCluster(t *testing.T, ids []string) []*testNode {
 	t.Helper()
 
 	transport := raft.NewFakeTransport()
@@ -324,13 +324,13 @@ type persistentTestCluster struct {
 	snapshotThreshold uint64
 }
 
-func newPersistentTestCluster(t *testing.T, ids []string) *persistentTestCluster {
+func newPersistCluster(t *testing.T, ids []string) *persistentTestCluster {
 	t.Helper()
 
-	return newPersistentTestClusterWithSnapshotThreshold(t, ids, 0)
+	return newPersistClusterWithSnap(t, ids, 0)
 }
 
-func newPersistentTestClusterWithSnapshotThreshold(t *testing.T, ids []string, snapshotThreshold uint64) *persistentTestCluster {
+func newPersistClusterWithSnap(t *testing.T, ids []string, snapshotThreshold uint64) *persistentTestCluster {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -347,20 +347,20 @@ func newPersistentTestClusterWithSnapshotThreshold(t *testing.T, ids []string, s
 	dir := t.TempDir()
 	for _, id := range ids {
 		cluster.paths[id] = filepath.Join(dir, id+".wal")
-		cluster.nodes = append(cluster.nodes, cluster.startNode(t, id))
+		cluster.nodes = append(cluster.nodes, cluster.start(t, id))
 	}
 
 	t.Cleanup(func() {
 		cluster.cancel()
 		for i := range cluster.nodes {
-			cluster.stopNode(t, i)
+			cluster.stop(t, i)
 		}
 	})
 
 	return cluster
 }
 
-func (c *persistentTestCluster) startNode(t *testing.T, id string) *testNode {
+func (c *persistentTestCluster) start(t *testing.T, id string) *testNode {
 	t.Helper()
 
 	storage, err := logstore.OpenFileStorage(c.paths[id])
@@ -408,7 +408,7 @@ func (c *persistentTestCluster) startNode(t *testing.T, id string) *testNode {
 	}
 }
 
-func (c *persistentTestCluster) stopNode(t *testing.T, index int) {
+func (c *persistentTestCluster) stop(t *testing.T, index int) {
 	t.Helper()
 
 	if index < 0 || index >= len(c.nodes) {
@@ -430,21 +430,21 @@ func (c *persistentTestCluster) stopNode(t *testing.T, index int) {
 	node.store.Close()
 }
 
-func (c *persistentTestCluster) restartNode(t *testing.T, index int) *testNode {
+func (c *persistentTestCluster) restart(t *testing.T, index int) *testNode {
 	t.Helper()
 
 	if index < 0 || index >= len(c.nodes) {
 		t.Fatalf("node index %d out of range", index)
 	}
 	id := c.nodes[index].id
-	c.stopNode(t, index)
+	c.stop(t, index)
 
-	node := c.startNode(t, id)
+	node := c.start(t, id)
 	c.nodes[index] = node
 	return node
 }
 
-func waitForLeader(t *testing.T, nodes []*testNode, timeout time.Duration) *testNode {
+func waitLead(t *testing.T, nodes []*testNode, timeout time.Duration) *testNode {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -478,7 +478,7 @@ func waitForLeader(t *testing.T, nodes []*testNode, timeout time.Duration) *test
 	return nil
 }
 
-func waitForAllStores(t *testing.T, nodes []*testNode, key string, want []byte, timeout time.Duration) {
+func waitStores(t *testing.T, nodes []*testNode, key string, want []byte, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -504,7 +504,7 @@ func waitForAllStores(t *testing.T, nodes []*testNode, key string, want []byte, 
 	t.Fatalf("timed out waiting for key %q to replicate", key)
 }
 
-func waitForEngineValue(t *testing.T, node *testNode, key string, want []byte, timeout time.Duration) {
+func waitValue(t *testing.T, node *testNode, key string, want []byte, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -520,7 +520,7 @@ func waitForEngineValue(t *testing.T, node *testNode, key string, want []byte, t
 	t.Fatalf("timed out waiting for node=%s key=%q want=%q; ok=%v value=%q err=%v", node.id, key, want, ok, value, err)
 }
 
-func waitForSnapshot(t *testing.T, storage *logstore.FileStorage, timeout time.Duration) {
+func waitSnap(t *testing.T, storage *logstore.FileStorage, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -536,7 +536,7 @@ func waitForSnapshot(t *testing.T, storage *logstore.FileStorage, timeout time.D
 	t.Fatalf("timed out waiting for snapshot; snapshot=%+v err=%v", snapshot, err)
 }
 
-func assertNotLeader(t *testing.T, err error) {
+func assertLeaderErr(t *testing.T, err error) {
 	t.Helper()
 
 	var notLeader NotLeaderError

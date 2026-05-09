@@ -21,7 +21,7 @@ type fakeService struct {
 
 var _ minikv.Service = (*fakeService)(nil)
 
-func newFakeService() *fakeService {
+func newSvc() *fakeService {
 	return &fakeService{
 		values: make(map[string][]byte),
 	}
@@ -42,11 +42,11 @@ func (s *fakeService) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func TestMiniKVGRPC(t *testing.T) {
+func TestGRPC(t *testing.T) {
 	t.Parallel()
 
-	service := newFakeService()
-	client, cleanup := newTestClient(t, service)
+	service := newSvc()
+	client, cleanup := newClient(t, service)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -76,10 +76,10 @@ func TestMiniKVGRPC(t *testing.T) {
 	}
 }
 
-func TestMiniKVGRPCPropagatesErrors(t *testing.T) {
+func TestErrors(t *testing.T) {
 	t.Parallel()
 
-	client, cleanup := newTestClient(t, errorService{})
+	client, cleanup := newClient(t, errorService{})
 	defer cleanup()
 
 	_, err := client.Get(context.Background(), &minikvv1.GetRequest{Key: "a"})
@@ -104,7 +104,7 @@ func (errorService) Delete(context.Context, string) error {
 	return errors.New("boom")
 }
 
-func newTestClient(t *testing.T, service minikv.Service) (minikvv1.KVClient, func()) {
+func newClient(t *testing.T, service minikv.Service) (minikvv1.KVClient, func()) {
 	t.Helper()
 
 	listener := bufconn.Listen(bufSize)

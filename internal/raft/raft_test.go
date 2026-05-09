@@ -9,7 +9,7 @@ import (
 	"mini-kv/internal/raft/logstore"
 )
 
-func TestNewNode(t *testing.T) {
+func TestNodeInit(t *testing.T) {
 	storage := logstore.NewMemoryStorage()
 	transport := raft.NewFakeTransport()
 
@@ -34,83 +34,7 @@ func TestNewNode(t *testing.T) {
 	}
 }
 
-func TestMemoryStorageAppend(t *testing.T) {
-	storage := logstore.NewMemoryStorage()
-
-	err := storage.Append([]raft.LogEntry{
-		{Index: 1, Term: 1, Type: raft.EntryNormal, Data: []byte("a")},
-		{Index: 2, Term: 1, Type: raft.EntryNormal, Data: []byte("b")},
-	})
-	if err != nil {
-		t.Fatalf("append error: %v", err)
-	}
-
-	lastIndex, err := storage.LastIndex()
-	if err != nil {
-		t.Fatalf("last index error: %v", err)
-	}
-	if lastIndex != 2 {
-		t.Fatalf("last index = %d, want 2", lastIndex)
-	}
-
-	term, err := storage.Term(2)
-	if err != nil {
-		t.Fatalf("term error: %v", err)
-	}
-	if term != 1 {
-		t.Fatalf("term = %d, want 1", term)
-	}
-
-	entries, err := storage.Entries(1, 3)
-	if err != nil {
-		t.Fatalf("entries error: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("len(entries) = %d, want 2", len(entries))
-	}
-}
-
-func TestFakeTransport(t *testing.T) {
-	transport := raft.NewFakeTransport()
-	storage := logstore.NewMemoryStorage()
-
-	node, err := raft.NewNode(raft.Config{
-		ID:               "node1",
-		Peers:            []string{"node1", "node2", "node3"},
-		Storage:          storage,
-		Transport:        transport,
-		ElectionTimeout:  time.Second,
-		HeartbeatTimeout: 100 * time.Millisecond,
-		ApplyBufferSize:  16,
-	})
-	if err != nil {
-		t.Fatalf("new node error: %v", err)
-	}
-
-	handler, ok := node.(raft.RPCHandler)
-	if !ok {
-		t.Fatalf("node should implement RPCHandler")
-	}
-	transport.Register("node1", handler)
-
-	resp, err := transport.RequestVote(context.Background(), "node1", raft.RequestVoteRequest{
-		Term:         1,
-		CandidateID:  "node2",
-		LastLogIndex: 0,
-		LastLogTerm:  0,
-	})
-	if err != nil {
-		t.Fatalf("request vote error: %v", err)
-	}
-	if resp.Term != 1 {
-		t.Fatalf("term = %d, want 1", resp.Term)
-	}
-	if !resp.VoteGranted {
-		t.Fatalf("vote should be granted")
-	}
-}
-
-func TestSingleLeaderElection(t *testing.T) {
+func TestLeaderElect(t *testing.T) {
 	transport := raft.NewFakeTransport()
 	peers := []string{"node1", "node2", "node3"}
 
@@ -148,7 +72,7 @@ func TestSingleLeaderElection(t *testing.T) {
 		}
 	}()
 
-	leader := waitLeader(t, nodes, time.Second)
+	leader := waitLead(t, nodes, time.Second)
 	if leader == "" {
 		t.Fatalf("leader should be elected")
 	}
@@ -164,7 +88,7 @@ func TestSingleLeaderElection(t *testing.T) {
 	}
 }
 
-func TestLeaderFailover(t *testing.T) {
+func TestLeaderFail(t *testing.T) {
 	transport := raft.NewFakeTransport()
 	peers := []string{"node1", "node2", "node3"}
 
@@ -202,7 +126,7 @@ func TestLeaderFailover(t *testing.T) {
 		}
 	}()
 
-	firstLeader := waitLeaderFromMap(t, nodes, time.Second)
+	firstLeader := waitLeadMap(t, nodes, time.Second)
 	if firstLeader == "" {
 		t.Fatalf("first leader should be elected")
 	}
@@ -211,7 +135,7 @@ func TestLeaderFailover(t *testing.T) {
 	transport.Unregister(firstLeader)
 
 	delete(nodes, firstLeader)
-	secondLeader := waitLeaderFromMap(t, nodes, time.Second)
+	secondLeader := waitLeadMap(t, nodes, time.Second)
 	if secondLeader == "" {
 		t.Fatalf("new leader should be elected")
 	}
@@ -220,7 +144,7 @@ func TestLeaderFailover(t *testing.T) {
 	}
 }
 
-func waitLeader(t *testing.T, nodes []raft.Node, timeout time.Duration) string {
+func waitLead(t *testing.T, nodes []raft.Node, timeout time.Duration) string {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -241,7 +165,7 @@ func waitLeader(t *testing.T, nodes []raft.Node, timeout time.Duration) string {
 	return ""
 }
 
-func waitLeaderFromMap(t *testing.T, nodes map[string]raft.Node, timeout time.Duration) string {
+func waitLeadMap(t *testing.T, nodes map[string]raft.Node, timeout time.Duration) string {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -256,7 +180,7 @@ func waitLeaderFromMap(t *testing.T, nodes map[string]raft.Node, timeout time.Du
 	return ""
 }
 
-func TestLeaderPropose(t *testing.T) {
+func TestPropose(t *testing.T) {
 	transport := raft.NewFakeTransport()
 	peers := []string{"node1", "node2", "node3"}
 
@@ -294,7 +218,7 @@ func TestLeaderPropose(t *testing.T) {
 		}
 	}()
 
-	leaderID := waitLeaderFromMap(t, nodes, time.Second)
+	leaderID := waitLeadMap(t, nodes, time.Second)
 	if leaderID == "" {
 		t.Fatalf("leader should be elected")
 	}
@@ -308,7 +232,7 @@ func TestLeaderPropose(t *testing.T) {
 		t.Fatalf("propose should return non-zero index")
 	}
 
-	msg := waitApply(t, leader.ApplyCh(), time.Second)
+	msg := waitMsg(t, leader.ApplyCh(), time.Second)
 	if msg.Index != index {
 		t.Fatalf("apply index = %d, want %d", msg.Index, index)
 	}
@@ -317,7 +241,7 @@ func TestLeaderPropose(t *testing.T) {
 	}
 }
 
-func TestFollowerRejectsPropose(t *testing.T) {
+func TestRejectPropose(t *testing.T) {
 	transport := raft.NewFakeTransport()
 	peers := []string{"node1", "node2", "node3"}
 
@@ -355,7 +279,7 @@ func TestFollowerRejectsPropose(t *testing.T) {
 		}
 	}()
 
-	leaderID := waitLeaderFromMap(t, nodes, time.Second)
+	leaderID := waitLeadMap(t, nodes, time.Second)
 	if leaderID == "" {
 		t.Fatalf("leader should be elected")
 	}
@@ -375,7 +299,7 @@ func TestFollowerRejectsPropose(t *testing.T) {
 	t.Fatalf("no follower found")
 }
 
-func waitApply(t *testing.T, ch <-chan raft.ApplyMsg, timeout time.Duration) raft.ApplyMsg {
+func waitMsg(t *testing.T, ch <-chan raft.ApplyMsg, timeout time.Duration) raft.ApplyMsg {
 	t.Helper()
 
 	timer := time.NewTimer(timeout)

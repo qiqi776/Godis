@@ -15,11 +15,12 @@ func (r *raftNode) HandleRequestVote(ctx context.Context, req RequestVoteRequest
 		}, nil
 	}
 	if req.Term > r.currentTerm {
+		prev := r.snapshotState()
 		r.state = Follower
 		r.currentTerm = req.Term
 		r.votedFor = ""
 		r.leaderID = ""
-		if err := r.persistState(); err != nil {
+		if err := r.persist(prev); err != nil {
 			return RequestVoteResponse{}, err
 		}
 	}
@@ -28,10 +29,11 @@ func (r *raftNode) HandleRequestVote(ctx context.Context, req RequestVoteRequest
 	logOK := r.isLogUpToDate(req.LastLogIndex, req.LastLogTerm)
 
 	if canVote && logOK {
+		prev := r.snapshotState()
 		r.state = Follower
 		r.votedFor = req.CandidateID
 		r.leaderID = ""
-		if err := r.persistState(); err != nil {
+		if err := r.persist(prev); err != nil {
 			return RequestVoteResponse{}, err
 		}
 		r.resetElectionTimer()
@@ -60,9 +62,12 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 		}, nil
 	}
 	if req.Term > r.currentTerm {
+		prev := r.snapshotState()
+		r.state = Follower
+		r.leaderID = ""
 		r.currentTerm = req.Term
 		r.votedFor = ""
-		if err := r.persistState(); err != nil {
+		if err := r.persist(prev); err != nil {
 			return AppendEntriesResponse{}, err
 		}
 	}
@@ -116,9 +121,12 @@ func (r *raftNode) HandleInstallSnapshot(ctx context.Context, req InstallSnapsho
 		return InstallSnapshotResponse{Term: term}, nil
 	}
 	if req.Term > r.currentTerm {
+		prev := r.snapshotState()
+		r.state = Follower
+		r.leaderID = ""
 		r.currentTerm = req.Term
 		r.votedFor = ""
-		if err := r.persistState(); err != nil {
+		if err := r.persist(prev); err != nil {
 			r.mu.Unlock()
 			return InstallSnapshotResponse{}, err
 		}
