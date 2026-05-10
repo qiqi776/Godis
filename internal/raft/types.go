@@ -1,11 +1,23 @@
 package raft
 
+import "errors"
+
 type StateType uint8
 
 const (
 	Follower StateType = iota + 1
 	Candidate
 	Leader
+)
+
+var (
+	ErrNotLeader         = errors.New("raft: not leader")
+	ErrNodeStopped       = errors.New("raft: node stopped")
+	ErrInvalidConfig     = errors.New("raft: invalid config")
+	ErrEntryNotFound     = errors.New("raft: log entry not found")
+	ErrCompacted         = errors.New("raft: log entry compacted")
+	ErrStorageConflict   = errors.New("raft: storage conflict")
+	ErrReadIndexNotReady = errors.New("raft: read index not ready")
 )
 
 func (s StateType) String() string {

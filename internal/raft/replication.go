@@ -24,6 +24,7 @@ func (r *raftNode) replicateAll() {
 	}
 }
 
+// 发送心跳/日志复制
 func (r *raftNode) replicate(peer string) {
 	for {
 		snapshotReq, term, ok := r.buildInstallSnapshotRequest(peer)
@@ -38,7 +39,7 @@ func (r *raftNode) replicate(peer string) {
 				r.stepDown(resp.Term, "")
 				return
 			}
-			r.handleInstallSnapshotSuccess(peer, snapshotReq)
+			r.handleInstallSnapshot(peer, snapshotReq)
 			return
 		}
 		req, term, ok := r.buildAppendEntriesRequest(peer)
@@ -56,7 +57,7 @@ func (r *raftNode) replicate(peer string) {
 			return
 		}
 		if resp.Success {
-			r.handleAppendEntriesSuccess(peer, req)
+			r.handleAppendEntries(peer, req)
 			return
 		}
 		if !r.decreaseNextIndex(peer, term) {
@@ -133,7 +134,7 @@ func (r *raftNode) buildAppendEntriesRequest(peer string) (AppendEntriesRequest,
 	}, term, true
 }
 
-func (r *raftNode) handleAppendEntriesSuccess(peer string, req AppendEntriesRequest) {
+func (r *raftNode) handleAppendEntries(peer string, req AppendEntriesRequest) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -148,6 +149,7 @@ func (r *raftNode) handleAppendEntriesSuccess(peer string, req AppendEntriesRequ
 	r.advanceCommitIndex()
 }
 
+// 失败回退索引
 func (r *raftNode) decreaseNextIndex(peer string, term uint64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -168,7 +170,7 @@ func (r *raftNode) decreaseNextIndex(peer string, term uint64) bool {
 	return true
 }
 
-func (r *raftNode) handleInstallSnapshotSuccess(peer string, req InstallSnapshotRequest) {
+func (r *raftNode) handleInstallSnapshot(peer string, req InstallSnapshotRequest) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

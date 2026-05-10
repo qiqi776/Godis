@@ -104,6 +104,7 @@ func NewNode(config Config) (Node, error) {
 	return node, nil
 }
 
+// Raft 节点入口，负责启动所有后台协程并完成初始状态恢复
 func (r *raftNode) Start() error {
 	r.mu.Lock()
 	if r.stopped {
@@ -123,6 +124,7 @@ func (r *raftNode) Start() error {
 	return nil
 }
 
+// 停止节点
 func (r *raftNode) Stop() error {
 	r.stopOnce.Do(func() {
 		r.mu.Lock()
@@ -135,6 +137,7 @@ func (r *raftNode) Stop() error {
 	return nil
 }
 
+// Leader 接收上层提案，通过 Raft 集群达成共识并最终应用到状态机
 func (r *raftNode) Propose(ctx context.Context, data []byte) (uint64, error) {
 	r.mu.Lock()
 	if r.stopped {
@@ -178,6 +181,7 @@ func (r *raftNode) appendEntry(entryType EntryType, data []byte) (LogEntry, erro
 	return entry, nil
 }
 
+// 上层通知 Raft 做日志压缩
 func (r *raftNode) Snapshot(index uint64, data []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -208,18 +212,21 @@ func (r *raftNode) Snapshot(index uint64, data []byte) error {
 	})
 }
 
+// 返回当前节点是否是 Leader
 func (r *raftNode) IsLeader() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return !r.stopped && r.state == Leader
 }
 
+// 返回当前节点的 LeaderID
 func (r *raftNode) LeaderID() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.leaderID
 }
 
+// 上层通过该通道接收已提交的日志条目和快照
 func (r *raftNode) ApplyCh() <-chan ApplyMsg {
 	return r.applyCh
 }

@@ -1,19 +1,88 @@
-package raft_test
+package raft
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
-
-	raft "mini-kv/internal/raft"
-	"mini-kv/internal/raft/logstore"
 )
 
-func TestNodeInit(t *testing.T) {
-	storage := logstore.NewMemoryStorage()
-	transport := raft.NewFakeTransport()
+func TestNoSelf(t *testing.T) {
+	_, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node2", "node3"},
+		Storage:          &failingHardStateStorage{},
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("new node error = %v, want %v", err, ErrInvalidConfig)
+	}
+}
 
-	node, err := raft.NewNode(raft.Config{
+func TestDupPeer(t *testing.T) {
+	_, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1", "node2", "node2"},
+		Storage:          &failingHardStateStorage{},
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("new node error = %v, want %v", err, ErrInvalidConfig)
+	}
+}
+
+func TestFake(t *testing.T) {
+	transport := NewFakeTransport()
+	storage := newMemStorage()
+
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1", "node2", "node3"},
+		Storage:          storage,
+		Transport:        transport,
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node error: %v", err)
+	}
+
+	handler, ok := node.(RPCHandler)
+	if !ok {
+		t.Fatalf("node should implement RPCHandler")
+	}
+	transport.Register("node1", handler)
+
+	resp, err := transport.RequestVote(context.Background(), "node1", RequestVoteRequest{
+		Term:         1,
+		CandidateID:  "node2",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+	if err != nil {
+		t.Fatalf("request vote error: %v", err)
+	}
+	if resp.Term != 1 {
+		t.Fatalf("term = %d, want 1", resp.Term)
+	}
+	if !resp.VoteGranted {
+		t.Fatalf("vote should be granted")
+	}
+}
+
+func TestNodeInit(t *testing.T) {
+	storage := newMemStorage()
+	transport := NewFakeTransport()
+
+	node, err := NewNode(Config{
 		ID:               "node1",
 		Peers:            []string{"node1", "node2", "node3"},
 		Storage:          storage,
@@ -35,15 +104,15 @@ func TestNodeInit(t *testing.T) {
 }
 
 func TestLeaderElect(t *testing.T) {
-	transport := raft.NewFakeTransport()
+	transport := NewFakeTransport()
 	peers := []string{"node1", "node2", "node3"}
 
-	nodes := make([]raft.Node, 0, len(peers))
+	nodes := make([]Node, 0, len(peers))
 	for _, id := range peers {
-		node, err := raft.NewNode(raft.Config{
+		node, err := NewNode(Config{
 			ID:               id,
 			Peers:            peers,
-			Storage:          logstore.NewMemoryStorage(),
+			Storage:          newMemStorage(),
 			Transport:        transport,
 			ElectionTimeout:  80 * time.Millisecond,
 			HeartbeatTimeout: 20 * time.Millisecond,
@@ -53,7 +122,7 @@ func TestLeaderElect(t *testing.T) {
 			t.Fatalf("new node %s error: %v", id, err)
 		}
 
-		handler, ok := node.(raft.RPCHandler)
+		handler, ok := node.(RPCHandler)
 		if !ok {
 			t.Fatalf("node %s should implement RPCHandler", id)
 		}
@@ -89,15 +158,15 @@ func TestLeaderElect(t *testing.T) {
 }
 
 func TestLeaderFail(t *testing.T) {
-	transport := raft.NewFakeTransport()
+	transport := NewFakeTransport()
 	peers := []string{"node1", "node2", "node3"}
 
-	nodes := make(map[string]raft.Node)
+	nodes := make(map[string]Node)
 	for _, id := range peers {
-		node, err := raft.NewNode(raft.Config{
+		node, err := NewNode(Config{
 			ID:               id,
 			Peers:            peers,
-			Storage:          logstore.NewMemoryStorage(),
+			Storage:          newMemStorage(),
 			Transport:        transport,
 			ElectionTimeout:  80 * time.Millisecond,
 			HeartbeatTimeout: 20 * time.Millisecond,
@@ -107,7 +176,7 @@ func TestLeaderFail(t *testing.T) {
 			t.Fatalf("new node %s error: %v", id, err)
 		}
 
-		handler, ok := node.(raft.RPCHandler)
+		handler, ok := node.(RPCHandler)
 		if !ok {
 			t.Fatalf("node %s should implement RPCHandler", id)
 		}
@@ -144,52 +213,16 @@ func TestLeaderFail(t *testing.T) {
 	}
 }
 
-func waitLead(t *testing.T, nodes []raft.Node, timeout time.Duration) string {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var leader string
-		leaderCount := 0
-		for _, node := range nodes {
-			if node.IsLeader() {
-				leader = node.LeaderID()
-				leaderCount++
-			}
-		}
-		if leaderCount == 1 {
-			return leader
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return ""
-}
-
-func waitLeadMap(t *testing.T, nodes map[string]raft.Node, timeout time.Duration) string {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		for id, node := range nodes {
-			if node.IsLeader() {
-				return id
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return ""
-}
-
 func TestPropose(t *testing.T) {
-	transport := raft.NewFakeTransport()
+	transport := NewFakeTransport()
 	peers := []string{"node1", "node2", "node3"}
 
-	nodes := make(map[string]raft.Node)
+	nodes := make(map[string]Node)
 	for _, id := range peers {
-		node, err := raft.NewNode(raft.Config{
+		node, err := NewNode(Config{
 			ID:               id,
 			Peers:            peers,
-			Storage:          logstore.NewMemoryStorage(),
+			Storage:          newMemStorage(),
 			Transport:        transport,
 			ElectionTimeout:  80 * time.Millisecond,
 			HeartbeatTimeout: 20 * time.Millisecond,
@@ -199,7 +232,7 @@ func TestPropose(t *testing.T) {
 			t.Fatalf("new node %s error: %v", id, err)
 		}
 
-		handler, ok := node.(raft.RPCHandler)
+		handler, ok := node.(RPCHandler)
 		if !ok {
 			t.Fatalf("node %s should implement RPCHandler", id)
 		}
@@ -242,15 +275,15 @@ func TestPropose(t *testing.T) {
 }
 
 func TestRejectPropose(t *testing.T) {
-	transport := raft.NewFakeTransport()
+	transport := NewFakeTransport()
 	peers := []string{"node1", "node2", "node3"}
 
-	nodes := make(map[string]raft.Node)
+	nodes := make(map[string]Node)
 	for _, id := range peers {
-		node, err := raft.NewNode(raft.Config{
+		node, err := NewNode(Config{
 			ID:               id,
 			Peers:            peers,
-			Storage:          logstore.NewMemoryStorage(),
+			Storage:          newMemStorage(),
 			Transport:        transport,
 			ElectionTimeout:  80 * time.Millisecond,
 			HeartbeatTimeout: 20 * time.Millisecond,
@@ -260,7 +293,7 @@ func TestRejectPropose(t *testing.T) {
 			t.Fatalf("new node %s error: %v", id, err)
 		}
 
-		handler, ok := node.(raft.RPCHandler)
+		handler, ok := node.(RPCHandler)
 		if !ok {
 			t.Fatalf("node %s should implement RPCHandler", id)
 		}
@@ -290,8 +323,8 @@ func TestRejectPropose(t *testing.T) {
 		}
 
 		_, err := node.Propose(context.Background(), []byte("cmd-1"))
-		if err != raft.ErrNotLeader {
-			t.Fatalf("follower propose error = %v, want %v", err, raft.ErrNotLeader)
+		if err != ErrNotLeader {
+			t.Fatalf("follower propose error = %v, want %v", err, ErrNotLeader)
 		}
 		return
 	}
@@ -299,7 +332,280 @@ func TestRejectPropose(t *testing.T) {
 	t.Fatalf("no follower found")
 }
 
-func waitMsg(t *testing.T, ch <-chan raft.ApplyMsg, timeout time.Duration) raft.ApplyMsg {
+func TestReadIndexIsolated(t *testing.T) {
+	net := newNet()
+	nodes := newNodes(t, net, []string{"node1", "node2", "node3"})
+
+	startNodes(t, nodes)
+	defer stopNodes(nodes)
+
+	leaderID := waitLeadMap(t, nodes, time.Second)
+	if leaderID == "" {
+		t.Fatalf("leader should be elected")
+	}
+
+	net.cut(leaderID)
+
+	newLeaderID := waitOtherLead(t, nodes, leaderID, 2*time.Second)
+	if newLeaderID == "" {
+		t.Fatalf("majority side should elect new leader")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	if _, err := nodes[leaderID].ReadIndex(ctx); err == nil {
+		t.Fatalf("isolated old leader read should fail")
+	}
+}
+
+func TestReadIndexReady(t *testing.T) {
+	net := newNet()
+	nodes := newNodes(t, net, []string{"node1", "node2", "node3"})
+
+	startNodes(t, nodes)
+	defer stopNodes(nodes)
+
+	leaderID := waitLeadMap(t, nodes, time.Second)
+	if leaderID == "" {
+		t.Fatalf("leader should be elected")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	index, err := nodes[leaderID].ReadIndex(ctx)
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	if index == 0 {
+		t.Fatalf("read index should be non-zero")
+	}
+}
+
+func TestVoteStale(t *testing.T) {
+	storage := newMemStorage()
+	if err := storage.Append([]LogEntry{
+		{Index: 1, Term: 2, Type: EntryNormal, Data: []byte("newer")},
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1", "node2"},
+		Storage:          storage,
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	handler := node.(RPCHandler)
+	resp, err := handler.HandleRequestVote(context.Background(), RequestVoteRequest{
+		Term:         3,
+		CandidateID:  "node2",
+		LastLogIndex: 1,
+		LastLogTerm:  1,
+	})
+	if err != nil {
+		t.Fatalf("request vote: %v", err)
+	}
+	if resp.VoteGranted {
+		t.Fatalf("stale candidate should not get vote")
+	}
+}
+
+func TestConflictReplace(t *testing.T) {
+	storage := newMemStorage()
+	if err := storage.Append([]LogEntry{
+		{Index: 1, Term: 1, Type: EntryNormal, Data: []byte("a")},
+		{Index: 2, Term: 9, Type: EntryNormal, Data: []byte("bad")},
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1", "node2"},
+		Storage:          storage,
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	handler := node.(RPCHandler)
+	resp, err := handler.HandleAppendEntries(context.Background(), AppendEntriesRequest{
+		Term:         2,
+		LeaderID:     "node2",
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+		Entries: []LogEntry{
+			{Index: 2, Term: 2, Type: EntryNormal, Data: []byte("good")},
+		},
+		LeaderCommit: 2,
+	})
+	if err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("append entries should succeed")
+	}
+
+	entries, err := storage.Entries(2, 3)
+	if err != nil {
+		t.Fatalf("entries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Term != 2 || string(entries[0].Data) != "good" {
+		t.Fatalf("entry = %+v, want term=2 data=good", entries)
+	}
+}
+
+func TestElectRollback(t *testing.T) {
+	node := newFailNode(t)
+	node.state = Follower
+	node.currentTerm = 7
+	node.leaderID = "node2"
+
+	node.Election()
+
+	assertState(t, node, Follower, 7, "", "node2")
+}
+
+func TestVoteTermRollback(t *testing.T) {
+	node := newFailNode(t)
+	node.state = Leader
+	node.currentTerm = 4
+	node.votedFor = node.id
+	node.leaderID = node.id
+
+	_, err := node.HandleRequestVote(context.Background(), RequestVoteRequest{
+		Term:         5,
+		CandidateID:  "node2",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+	if !errors.Is(err, errInjectedHardState) {
+		t.Fatalf("request vote error = %v, want %v", err, errInjectedHardState)
+	}
+
+	assertState(t, node, Leader, 4, node.id, node.id)
+}
+
+func TestVoteGrantRollback(t *testing.T) {
+	node := newFailNode(t)
+	node.state = Follower
+	node.currentTerm = 4
+	node.leaderID = "node9"
+
+	_, err := node.HandleRequestVote(context.Background(), RequestVoteRequest{
+		Term:         4,
+		CandidateID:  "node2",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+	if !errors.Is(err, errInjectedHardState) {
+		t.Fatalf("request vote error = %v, want %v", err, errInjectedHardState)
+	}
+
+	assertState(t, node, Follower, 4, "", "node9")
+}
+
+func TestAppendTermRollback(t *testing.T) {
+	node := newFailNode(t)
+	node.state = Candidate
+	node.currentTerm = 4
+	node.votedFor = node.id
+
+	_, err := node.HandleAppendEntries(context.Background(), AppendEntriesRequest{
+		Term:         5,
+		LeaderID:     "node2",
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+	})
+	if !errors.Is(err, errInjectedHardState) {
+		t.Fatalf("append entries error = %v, want %v", err, errInjectedHardState)
+	}
+
+	assertState(t, node, Candidate, 4, node.id, "")
+}
+
+func TestSnapTermRollback(t *testing.T) {
+	node := newFailNode(t)
+	node.state = Candidate
+	node.currentTerm = 4
+	node.votedFor = node.id
+
+	_, err := node.HandleInstallSnapshot(context.Background(), InstallSnapshotRequest{
+		Term:              5,
+		LeaderID:          "node2",
+		LastIncludedIndex: 1,
+		LastIncludedTerm:  1,
+		Data:              []byte("snapshot"),
+	})
+	if !errors.Is(err, errInjectedHardState) {
+		t.Fatalf("install snapshot error = %v, want %v", err, errInjectedHardState)
+	}
+
+	assertState(t, node, Candidate, 4, node.id, "")
+}
+
+func TestStepDownRollback(t *testing.T) {
+	node := newFailNode(t)
+	node.state = Leader
+	node.currentTerm = 4
+	node.votedFor = node.id
+	node.leaderID = node.id
+
+	node.stepDown(5, "node2")
+
+	assertState(t, node, Leader, 4, node.id, node.id)
+}
+
+func waitLead(t *testing.T, nodes []Node, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var leader string
+		leaderCount := 0
+		for _, node := range nodes {
+			if node.IsLeader() {
+				leader = node.LeaderID()
+				leaderCount++
+			}
+		}
+		if leaderCount == 1 {
+			return leader
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return ""
+}
+
+func waitLeadMap(t *testing.T, nodes map[string]Node, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for id, node := range nodes {
+			if node.IsLeader() {
+				return id
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return ""
+}
+
+func waitMsg(t *testing.T, ch <-chan ApplyMsg, timeout time.Duration) ApplyMsg {
 	t.Helper()
 
 	timer := time.NewTimer(timeout)
@@ -311,13 +617,446 @@ func waitMsg(t *testing.T, ch <-chan raft.ApplyMsg, timeout time.Duration) raft.
 			if !ok {
 				t.Fatalf("apply channel closed")
 			}
-			if msg.Type == raft.EntryNoop {
+			if msg.Type == EntryNoop {
 				continue
 			}
 			return msg
 		case <-timer.C:
 			t.Fatalf("timed out waiting for apply")
-			return raft.ApplyMsg{}
+			return ApplyMsg{}
 		}
+	}
+}
+
+type partitionNetwork struct {
+	mu       sync.RWMutex
+	handlers map[string]RPCHandler
+	blocked  map[partitionLink]struct{}
+}
+
+type partitionLink struct {
+	from string
+	to   string
+}
+
+func newNet() *partitionNetwork {
+	return &partitionNetwork{
+		handlers: make(map[string]RPCHandler),
+		blocked:  make(map[partitionLink]struct{}),
+	}
+}
+
+func (n *partitionNetwork) tr(id string) Transport {
+	return &partitionTransport{from: id, network: n}
+}
+
+func (n *partitionNetwork) add(id string, handler RPCHandler) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.handlers[id] = handler
+}
+
+func (n *partitionNetwork) cut(id string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for peer := range n.handlers {
+		if peer == id {
+			continue
+		}
+		n.blocked[partitionLink{from: id, to: peer}] = struct{}{}
+		n.blocked[partitionLink{from: peer, to: id}] = struct{}{}
+	}
+}
+
+func (n *partitionNetwork) get(from string, to string) (RPCHandler, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	if _, ok := n.blocked[partitionLink{from: from, to: to}]; ok {
+		return nil, ErrNodeStopped
+	}
+	handler := n.handlers[to]
+	if handler == nil {
+		return nil, ErrNodeStopped
+	}
+	return handler, nil
+}
+
+type partitionTransport struct {
+	from    string
+	network *partitionNetwork
+}
+
+func (t *partitionTransport) RequestVote(ctx context.Context, target string, req RequestVoteRequest) (RequestVoteResponse, error) {
+	handler, err := t.network.get(t.from, target)
+	if err != nil {
+		return RequestVoteResponse{}, err
+	}
+	return handler.HandleRequestVote(ctx, req)
+}
+
+func (t *partitionTransport) AppendEntries(ctx context.Context, target string, req AppendEntriesRequest) (AppendEntriesResponse, error) {
+	handler, err := t.network.get(t.from, target)
+	if err != nil {
+		return AppendEntriesResponse{}, err
+	}
+	return handler.HandleAppendEntries(ctx, req)
+}
+
+func (t *partitionTransport) InstallSnapshot(ctx context.Context, target string, req InstallSnapshotRequest) (InstallSnapshotResponse, error) {
+	handler, err := t.network.get(t.from, target)
+	if err != nil {
+		return InstallSnapshotResponse{}, err
+	}
+	return handler.HandleInstallSnapshot(ctx, req)
+}
+
+func newNodes(t *testing.T, net *partitionNetwork, ids []string) map[string]Node {
+	t.Helper()
+
+	nodes := make(map[string]Node, len(ids))
+	for _, id := range ids {
+		node, err := NewNode(Config{
+			ID:               id,
+			Peers:            ids,
+			Storage:          newMemStorage(),
+			Transport:        net.tr(id),
+			ElectionTimeout:  80 * time.Millisecond,
+			HeartbeatTimeout: 20 * time.Millisecond,
+			ApplyBufferSize:  16,
+		})
+		if err != nil {
+			t.Fatalf("new node %s: %v", id, err)
+		}
+		net.add(id, node.(RPCHandler))
+		nodes[id] = node
+	}
+	return nodes
+}
+
+func startNodes(t *testing.T, nodes map[string]Node) {
+	t.Helper()
+	for _, node := range nodes {
+		if err := node.Start(); err != nil {
+			t.Fatalf("start node: %v", err)
+		}
+	}
+}
+
+func stopNodes(nodes map[string]Node) {
+	for _, node := range nodes {
+		_ = node.Stop()
+	}
+}
+
+func waitOtherLead(t *testing.T, nodes map[string]Node, excluded string, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for id, node := range nodes {
+			if id == excluded {
+				continue
+			}
+			if node.IsLeader() {
+				return id
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return ""
+}
+
+var errInjectedHardState = errors.New("injected hard state failure")
+
+type failingHardStateStorage struct {
+	hardState HardState
+	snapshot  Snapshot
+}
+
+func (s *failingHardStateStorage) SaveHardState(HardState) error {
+	return errInjectedHardState
+}
+
+func (s *failingHardStateStorage) LoadHardState() (HardState, error) {
+	return s.hardState, nil
+}
+
+func (s *failingHardStateStorage) Append(entries []LogEntry) error {
+	return nil
+}
+
+func (s *failingHardStateStorage) Entries(start, end uint64) ([]LogEntry, error) {
+	return nil, ErrEntryNotFound
+}
+
+func (s *failingHardStateStorage) LastIndex() (uint64, error) {
+	return 0, nil
+}
+
+func (s *failingHardStateStorage) Term(index uint64) (uint64, error) {
+	if index == 0 {
+		return 0, nil
+	}
+	return 0, ErrEntryNotFound
+}
+
+func (s *failingHardStateStorage) TruncateSuffix(index uint64) error {
+	return nil
+}
+
+func (s *failingHardStateStorage) TruncatePrefix(index uint64) error {
+	return nil
+}
+
+func (s *failingHardStateStorage) SaveSnapshot(snapshot Snapshot) error {
+	s.snapshot = snapshot
+	return nil
+}
+
+func (s *failingHardStateStorage) LoadSnapshot() (Snapshot, error) {
+	return s.snapshot, nil
+}
+
+func (s *failingHardStateStorage) ApplySnapshot(snapshot Snapshot) error {
+	s.snapshot = snapshot
+	return nil
+}
+
+func newFailNode(t *testing.T) *raftNode {
+	t.Helper()
+
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1", "node2", "node3"},
+		Storage:          &failingHardStateStorage{},
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	return node.(*raftNode)
+}
+
+func assertState(t *testing.T, node *raftNode, state StateType, term uint64, votedFor string, leaderID string) {
+	t.Helper()
+
+	if node.state != state {
+		t.Fatalf("state = %v, want %v", node.state, state)
+	}
+	if node.currentTerm != term {
+		t.Fatalf("term = %d, want %d", node.currentTerm, term)
+	}
+	if node.votedFor != votedFor {
+		t.Fatalf("votedFor = %q, want %q", node.votedFor, votedFor)
+	}
+	if node.leaderID != leaderID {
+		t.Fatalf("leaderID = %q, want %q", node.leaderID, leaderID)
+	}
+}
+
+type memStorage struct {
+	mu        sync.RWMutex
+	hardState HardState
+	entries   []LogEntry
+	offset    uint64
+	snapshot  Snapshot
+}
+
+func newMemStorage() *memStorage {
+	return &memStorage{
+		entries: []LogEntry{
+			{Index: 0, Term: 0, Type: EntryNormal},
+		},
+	}
+}
+
+func (s *memStorage) SaveHardState(state HardState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hardState = state
+	return nil
+}
+
+func (s *memStorage) LoadHardState() (HardState, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hardState, nil
+}
+
+func (s *memStorage) Append(entries []LogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	firstIndex := entries[0].Index
+	if firstIndex < s.offset {
+		return ErrCompacted
+	}
+	if firstIndex == s.offset+uint64(len(s.entries)) {
+		s.entries = append(s.entries, cloneTestEntries(entries)...)
+		return nil
+	}
+	if firstIndex > s.offset+uint64(len(s.entries)) {
+		return ErrStorageConflict
+	}
+
+	cut := firstIndex - s.offset
+	s.entries = append(s.entries[:cut], cloneTestEntries(entries)...)
+	return nil
+}
+
+func (s *memStorage) Entries(start, end uint64) ([]LogEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if start < s.offset {
+		return nil, ErrCompacted
+	}
+	if end < start {
+		return nil, ErrEntryNotFound
+	}
+
+	first := s.offset
+	last := s.offset + uint64(len(s.entries)) - 1
+	if start > last+1 || end > last+1 {
+		return nil, ErrEntryNotFound
+	}
+
+	return cloneTestEntries(s.entries[start-first : end-first]), nil
+}
+
+func (s *memStorage) LastIndex() (uint64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.offset + uint64(len(s.entries)) - 1, nil
+}
+
+func (s *memStorage) Term(index uint64) (uint64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if index < s.offset {
+		return 0, ErrCompacted
+	}
+
+	last := s.offset + uint64(len(s.entries)) - 1
+	if index > last {
+		return 0, ErrEntryNotFound
+	}
+
+	return s.entries[index-s.offset].Term, nil
+}
+
+func (s *memStorage) TruncateSuffix(index uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if index < s.offset {
+		return ErrCompacted
+	}
+
+	last := s.offset + uint64(len(s.entries)) - 1
+	if index >= last {
+		return nil
+	}
+
+	s.entries = s.entries[:index-s.offset+1]
+	return nil
+}
+
+func (s *memStorage) TruncatePrefix(index uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.truncatePrefixLocked(index)
+}
+
+func (s *memStorage) SaveSnapshot(snapshot Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if snapshot.Index == 0 {
+		return ErrInvalidConfig
+	}
+	if snapshot.Index < s.offset {
+		return ErrCompacted
+	}
+	last := s.offset + uint64(len(s.entries)) - 1
+	if snapshot.Index > last {
+		return ErrEntryNotFound
+	}
+	if s.entries[snapshot.Index-s.offset].Term != snapshot.Term {
+		return ErrStorageConflict
+	}
+
+	s.snapshot = cloneTestSnapshot(snapshot)
+	return s.truncatePrefixLocked(snapshot.Index)
+}
+
+func (s *memStorage) LoadSnapshot() (Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneTestSnapshot(s.snapshot), nil
+}
+
+func (s *memStorage) ApplySnapshot(snapshot Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if snapshot.Index == 0 {
+		return ErrInvalidConfig
+	}
+	if snapshot.Index < s.snapshot.Index {
+		return ErrCompacted
+	}
+
+	s.snapshot = cloneTestSnapshot(snapshot)
+	s.offset = snapshot.Index
+	s.entries = []LogEntry{{Index: snapshot.Index, Term: snapshot.Term, Type: EntryNormal}}
+	return nil
+}
+
+func (s *memStorage) truncatePrefixLocked(index uint64) error {
+	if index <= s.offset {
+		return nil
+	}
+
+	last := s.offset + uint64(len(s.entries)) - 1
+	if index > last {
+		return ErrEntryNotFound
+	}
+
+	term := s.entries[index-s.offset].Term
+	s.entries = append(
+		[]LogEntry{{Index: index, Term: term, Type: EntryNormal}},
+		cloneTestEntries(s.entries[index-s.offset+1:])...,
+	)
+	s.offset = index
+	return nil
+}
+
+func cloneTestEntries(entries []LogEntry) []LogEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	cloned := make([]LogEntry, len(entries))
+	for i, entry := range entries {
+		cloned[i] = entry
+		cloned[i].Data = append([]byte(nil), entry.Data...)
+	}
+	return cloned
+}
+
+func cloneTestSnapshot(snapshot Snapshot) Snapshot {
+	return Snapshot{
+		Index: snapshot.Index,
+		Term:  snapshot.Term,
+		Data:  append([]byte(nil), snapshot.Data...),
 	}
 }
