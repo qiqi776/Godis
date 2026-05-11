@@ -10,24 +10,27 @@ import (
 	minikvv1 "mini-kv/api/minikv/v1"
 	"mini-kv/internal/config"
 	"mini-kv/internal/logger"
+	"mini-kv/internal/observability"
 	"mini-kv/internal/service/minikv"
 )
 
 type Server struct {
-	cfg     config.Config
-	logger  *logger.Logger
-	service minikv.Service
+	cfg      config.Config
+	logger   *logger.Logger
+	service  minikv.Service
+	registry *observability.Registry
 
 	mu         sync.RWMutex
 	listener   net.Listener
 	grpcServer *grpc.Server
 }
 
-func New(cfg config.Config, l *logger.Logger, service minikv.Service) *Server {
+func New(cfg config.Config, l *logger.Logger, service minikv.Service, registry *observability.Registry) *Server {
 	return &Server{
-		cfg:     cfg,
-		logger:  l,
-		service: service,
+		cfg:      cfg,
+		logger:   l,
+		service:  service,
+		registry: registry,
 	}
 }
 
@@ -37,7 +40,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 
-	server := grpc.NewServer()
+	server := grpc.NewServer(grpc.UnaryInterceptor(observability.UnaryServerInterceptor(s.registry)))
 	minikvv1.RegisterKVServer(server, newKVHandler(s.service))
 
 	s.mu.Lock()

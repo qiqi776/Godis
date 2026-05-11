@@ -1,0 +1,6 @@
+label,mode,routing,concurrency,duration,warmup,keyspace,value_size,preload_keys,read_percent,write_percent,delete_percent,seed
+set-small-1,set,leader,1,10s,2s,256,64,0,0,0,0,101
+set-small-16,set,leader,16,10s,2s,256,64,0,0,0,0,102
+get-small-16,get,leader,16,10s,2s,256,64,-1,0,0,0,103
+mixed-medium-32,mixed,leader,32,15s,3s,1024,256,-1,70,30,0,104
+delete-medium-16,delete,leader,16,10s,2s,512,256,-1,0,0,0,105

@@ -21,6 +21,12 @@ func TestLoad(t *testing.T) {
 	if cfg.Port != 0 {
 		t.Fatalf("port = %d, want 0", cfg.Port)
 	}
+	if cfg.Debug.Host != Default().Debug.Host {
+		t.Fatalf("debug host = %q, want %q", cfg.Debug.Host, Default().Debug.Host)
+	}
+	if cfg.Debug.Port != Default().Debug.Port {
+		t.Fatalf("debug port = %d, want %d", cfg.Debug.Port, Default().Debug.Port)
+	}
 	if cfg.Raft.ID != "node2" {
 		t.Fatalf("raft id = %q, want node2", cfg.Raft.ID)
 	}

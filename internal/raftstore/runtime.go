@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"mini-kv/internal/kv"
+	"mini-kv/internal/observability"
 	"mini-kv/internal/raft"
 )
 
@@ -138,12 +140,16 @@ func (w *waiter) unregister(index uint64, target chan applyResult) {
 
 type Options struct {
 	SnapshotThreshold uint64
+	NodeID            string
+	Registry          *observability.Registry
 }
 
 type Runtime struct {
 	store             kv.Store
 	node              raft.Node
 	waiter            *waiter
+	nodeID            string
+	registry          *observability.Registry
 	snapshotThreshold uint64
 	snapshotMu        sync.Mutex
 	lastSnapshotIndex uint64
@@ -161,6 +167,8 @@ func NewWithOptions(store kv.Store, node raft.Node, options Options) *Runtime {
 		store:             store,
 		node:              node,
 		waiter:            newWaiter(),
+		nodeID:            options.NodeID,
+		registry:          options.Registry,
 		snapshotThreshold: options.SnapshotThreshold,
 		appliedWaiters:    make(map[uint64][]chan struct{}),
 	}
@@ -179,12 +187,15 @@ func (s *Runtime) LeaderID() string {
 }
 
 func (s *Runtime) Propose(ctx context.Context, command kv.Command) (kv.ApplyResult, error) {
+	startedAt := time.Now()
 	if err := s.ensureLeader(); err != nil {
+		s.observe("propose", startedAt, err)
 		return kv.ApplyResult{}, err
 	}
 
 	data, err := EncodeCommand(command)
 	if err != nil {
+		s.observe("propose", startedAt, err)
 		return kv.ApplyResult{}, err
 	}
 
@@ -199,18 +210,24 @@ func (s *Runtime) Propose(ctx context.Context, command kv.Command) (kv.ApplyResu
 		return index, nil
 	})
 	if err != nil {
+		s.observe("propose", startedAt, err)
 		return kv.ApplyResult{}, err
 	}
 	if applied.Err != nil {
+		s.observe("propose", startedAt, applied.Err)
 		return applied.Result, applied.Err
 	}
 	if !bytes.Equal(applied.Data, data) {
+		s.observe("propose", startedAt, ErrProposalMismatch)
 		return applied.Result, ErrProposalMismatch
 	}
 	if applied.Result.Error != "" {
-		return applied.Result, errors.New(applied.Result.Error)
+		err = errors.New(applied.Result.Error)
+		s.observe("propose", startedAt, err)
+		return applied.Result, err
 	}
 
+	s.observe("propose", startedAt, nil)
 	return applied.Result, nil
 }
 
@@ -264,6 +281,7 @@ func (s *Runtime) applyLoop(ctx context.Context) {
 }
 
 func (s *Runtime) applyMessage(msg raft.ApplyMsg) {
+	startedAt := time.Now()
 	if msg.Snapshot {
 		err := s.store.Restore(msg.SnapshotData)
 		if err == nil {
@@ -274,10 +292,12 @@ func (s *Runtime) applyMessage(msg raft.ApplyMsg) {
 			Term:  msg.Term,
 			Err:   err,
 		})
+		s.observe("apply_snapshot", startedAt, err)
 		return
 	}
 	if msg.Type == raft.EntryNoop {
 		s.setAppliedIndex(msg.Index)
+		s.observe("apply_noop", startedAt, nil)
 		return
 	}
 	command, err := DecodeCommand(msg.Data)
@@ -298,6 +318,7 @@ func (s *Runtime) applyMessage(msg raft.ApplyMsg) {
 		Result: result,
 		Err:    err,
 	})
+	s.observe("apply_entry", startedAt, err)
 	if err == nil {
 		s.maybeSnapshot(msg.Index)
 	}
@@ -322,30 +343,41 @@ func (s *Runtime) maybeSnapshot(index uint64) {
 		return
 	}
 
+	startedAt := time.Now()
 	data, err := s.store.Snapshot()
 	if err != nil {
+		s.observe("snapshot_create", startedAt, err)
 		return
 	}
 	if err := s.node.Snapshot(index, data); err != nil {
+		s.observe("snapshot_create", startedAt, err)
 		return
 	}
 	s.lastSnapshotIndex = index
+	s.observe("snapshot_create", startedAt, nil)
 }
 
 func (s *Runtime) linearizableRead(ctx context.Context) error {
+	startedAt := time.Now()
 	if err := s.ensureLeader(); err != nil {
+		s.observe("read_index", startedAt, err)
 		return err
 	}
 
 	index, err := s.node.ReadIndex(ctx)
 	if err != nil {
 		if errors.Is(err, raft.ErrNotLeader) {
-			return NotLeaderError{LeaderID: s.node.LeaderID()}
+			err = NotLeaderError{LeaderID: s.node.LeaderID()}
+			s.observe("read_index", startedAt, err)
+			return err
 		}
+		s.observe("read_index", startedAt, err)
 		return err
 	}
 
-	return s.waitApplied(ctx, index)
+	err = s.waitApplied(ctx, index)
+	s.observe("read_index", startedAt, err)
+	return err
 }
 
 func (s *Runtime) waitApplied(ctx context.Context, index uint64) error {
@@ -388,6 +420,9 @@ func (s *Runtime) setAppliedIndex(index uint64) {
 	for _, ch := range ready {
 		close(ch)
 	}
+	if s.registry != nil && s.nodeID != "" {
+		s.registry.SetAppliedIndex(s.nodeID, index)
+	}
 }
 
 func (s *Runtime) unregisterAppliedWaiter(index uint64, target chan struct{}) {
@@ -406,4 +441,11 @@ func (s *Runtime) unregisterAppliedWaiter(index uint64, target chan struct{}) {
 		return
 	}
 	s.appliedWaiters[index] = waiters
+}
+
+func (s *Runtime) observe(operation string, startedAt time.Time, err error) {
+	if s.registry == nil || s.nodeID == "" {
+		return
+	}
+	s.registry.ObserveRaftOperation(s.nodeID, operation, time.Since(startedAt), err)
 }

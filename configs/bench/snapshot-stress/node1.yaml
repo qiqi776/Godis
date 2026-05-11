@@ -1,10 +1,10 @@
 host: 127.0.0.1
 port: 6380
-log_level: debug
+log_level: info
 debug:
   enabled: true
   host: 127.0.0.1
-  port: 17080
+  port: 17180
 
 raft:
   id: node1
@@ -14,8 +14,8 @@ raft:
     node1: 127.0.0.1:16380
     node2: 127.0.0.1:16381
     node3: 127.0.0.1:16382
-  wal_path: data/raft-node1.wal
+  wal_path: data/bench/snapshot-stress/node1/raft.wal
   election_timeout_ms: 150
   heartbeat_timeout_ms: 50
-  apply_buffer_size: 128
-  snapshot_threshold: 1024
+  apply_buffer_size: 256
+  snapshot_threshold: 128

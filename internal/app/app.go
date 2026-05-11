@@ -9,6 +9,7 @@ import (
 	"mini-kv/internal/config"
 	"mini-kv/internal/kv/mem"
 	"mini-kv/internal/logger"
+	"mini-kv/internal/observability"
 	"mini-kv/internal/raft"
 	"mini-kv/internal/raft/logstore"
 	"mini-kv/internal/raftstore"
@@ -23,6 +24,8 @@ type App struct {
 	KVStore       *mem.MemoryStore
 	KVService     minikv.Service
 	Server        *grpcserver.Server
+	DebugServer   *observability.Server
+	Registry      *observability.Registry
 	RaftNode      raft.Node
 	RaftStorage   *logstore.FileStorage
 	RaftRuntime   *raftstore.Runtime
@@ -39,6 +42,7 @@ func Start(cfgPath string) (*App, error) {
 	if err := validate(cfg.Raft); err != nil {
 		return nil, err
 	}
+	registry := observability.NewRegistry()
 
 	engine := mem.NewMemoryStore()
 
@@ -88,9 +92,12 @@ func Start(cfgPath string) (*App, error) {
 
 	runtime := raftstore.NewWithOptions(engine, raftNode, raftstore.Options{
 		SnapshotThreshold: cfg.Raft.SnapshotThreshold,
+		NodeID:            cfg.Raft.ID,
+		Registry:          registry,
 	})
 	service := minikv.NewRaft(runtime)
-	srv := grpcserver.New(cfg, l, service)
+	srv := grpcserver.New(cfg, l, service, registry)
+	debugServer := observability.NewServer(cfg.Debug, l, registry)
 
 	return &App{
 		Config:        cfg,
@@ -98,6 +105,8 @@ func Start(cfgPath string) (*App, error) {
 		KVStore:       engine,
 		KVService:     service,
 		Server:        srv,
+		DebugServer:   debugServer,
+		Registry:      registry,
 		RaftNode:      raftNode,
 		RaftStorage:   raftStorage,
 		RaftRuntime:   runtime,
@@ -108,6 +117,14 @@ func Start(cfgPath string) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	if a.RaftRuntime != nil {
 		a.RaftRuntime.Start(ctx)
+	}
+	observability.StartRaftSampler(ctx, a.Registry, a.Config.Raft.ID, a.RaftNode, a.RaftStorage, 0)
+	if a.DebugServer != nil {
+		go func() {
+			if err := a.DebugServer.Run(ctx); err != nil {
+				a.Logger.Errorf("debug server stopped: %v", err)
+			}
+		}()
 	}
 	defer func() {
 		if a.RaftNode != nil {

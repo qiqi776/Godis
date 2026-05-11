@@ -8,10 +8,17 @@ import (
 )
 
 type Config struct {
-	Host     string     `yaml:"host"`
-	Port     int        `yaml:"port"`
-	LogLevel string     `yaml:"log_level"`
-	Raft     RaftConfig `yaml:"raft"`
+	Host     string      `yaml:"host"`
+	Port     int         `yaml:"port"`
+	LogLevel string      `yaml:"log_level"`
+	Debug    DebugConfig `yaml:"debug"`
+	Raft     RaftConfig  `yaml:"raft"`
+}
+
+type DebugConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Host    string `yaml:"host"`
+	Port    int    `yaml:"port"`
 }
 
 type RaftConfig struct {
@@ -31,14 +38,19 @@ func Default() Config {
 		Host:     "127.0.0.1",
 		Port:     6380,
 		LogLevel: "debug",
+		Debug: DebugConfig{
+			Enabled: false,
+			Host:    "127.0.0.1",
+			Port:    6060,
+		},
 		Raft: RaftConfig{
 			ID:                 "node1",
 			Peers:              []string{"node1"},
 			ListenAddr:         "127.0.0.1:16380",
 			PeerAddrs:          map[string]string{"node1": "127.0.0.1:16380"},
 			WALPath:            "data/raft-node1.wal",
-			ElectionTimeoutMS:  300,
-			HeartbeatTimeoutMS: 100,
+			ElectionTimeoutMS:  150,
+			HeartbeatTimeoutMS: 50,
 			ApplyBufferSize:    128,
 			SnapshotThreshold:  1024,
 		},
@@ -81,6 +93,12 @@ func Load(path string) (Config, error) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = defaults.LogLevel
 	}
+	if cfg.Debug.Host == "" {
+		cfg.Debug.Host = defaults.Debug.Host
+	}
+	if cfg.Debug.Port <= 0 {
+		cfg.Debug.Port = defaults.Debug.Port
+	}
 	if cfg.Raft.ID == "" {
 		cfg.Raft.ID = defaults.Raft.ID
 	}
@@ -120,5 +138,9 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Address() string {
+	return fmt.Sprintf("%s:%d", c.Host, c.Port)
+}
+
+func (c DebugConfig) Address() string {
 	return fmt.Sprintf("%s:%d", c.Host, c.Port)
 }

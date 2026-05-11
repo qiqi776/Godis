@@ -1,0 +1,12 @@
+name: steady-local-3
+profile: steady
+thresholds:
+  max_p99_regression_percent: 20
+  max_qps_regression_percent: 20
+  max_error_increase: 0
+cases:
+  - set-small-1
+  - set-small-16
+  - get-small-16
+  - mixed-medium-32
+  - delete-medium-16
