@@ -135,6 +135,7 @@ func (r *raftNode) HandleInstallSnapshot(ctx context.Context, req InstallSnapsho
 			r.commitIndex = req.LastIncludedIndex
 		}
 		r.lastApplied = req.LastIncludedIndex
+		r.restoreSnapshot = snapshot
 		if err := r.persistState(); err != nil {
 			r.mu.Unlock()
 			return InstallSnapshotResponse{}, err
@@ -144,7 +145,7 @@ func (r *raftNode) HandleInstallSnapshot(ctx context.Context, req InstallSnapsho
 	r.mu.Unlock()
 
 	if shouldApply {
-		r.publishSnapshot(snapshot)
+		r.notifyApply()
 	}
 	return InstallSnapshotResponse{Term: term}, nil
 }

@@ -49,7 +49,6 @@ type raftNode struct {
 	applyNotifyCh    chan struct{}
 	stopCh           chan struct{}
 	stopOnce         sync.Once
-	closeApplyOnce   sync.Once
 	restoreSnapshot  Snapshot
 }
 
@@ -116,9 +115,6 @@ func (r *raftNode) Start() error {
 		return err
 	}
 	r.mu.Unlock()
-	if r.restoreSnapshot.Index > 0 {
-		r.publishSnapshot(r.restoreSnapshot)
-	}
 
 	r.wg.Add(3)
 	go func() { defer r.wg.Done(); r.electionLoop() }()
@@ -130,11 +126,16 @@ func (r *raftNode) Start() error {
 
 // 停止节点
 func (r *raftNode) Stop() error {
-	r.mu.Lock()
-	r.stopped = true
-	r.mu.Unlock()
-	r.signalStop()
-	r.finishStop()
+	r.stopOnce.Do(func() {
+		r.mu.Lock()
+		if !r.stopped {
+			r.stopped = true
+		}
+		r.mu.Unlock()
+		close(r.stopCh)
+		r.wg.Wait()
+		close(r.applyCh)
+	})
 	return nil
 }
 
@@ -228,24 +229,10 @@ func (r *raftNode) LeaderID() string {
 	return r.leaderID
 }
 
-// 上层通过该通道接收已提交的日志条目和快照
+// 上层通过该通道接收已提交的日志条目和快照。
+// 通道会在 Stop 完成后关闭。
 func (r *raftNode) ApplyCh() <-chan ApplyMsg {
 	return r.applyCh
-}
-
-// 发出停止信号
-func (r *raftNode) signalStop() {
-	r.stopOnce.Do(func() {
-		close(r.stopCh)
-	})
-}
-
-// 等待所有循环退出并关闭 applyCh
-func (r *raftNode) finishStop() {
-	r.wg.Wait()
-	r.closeApplyOnce.Do(func() {
-		close(r.applyCh)
-	})
 }
 
 // 返回节点错误
@@ -268,7 +255,8 @@ func (r *raftNode) failNodeLocked(err error) error {
 	r.leaderID = ""
 	r.votedFor = ""
 	r.stopped = true
-	r.signalStop()
-	go r.finishStop()
+	go func() {
+		_ = r.Stop()
+	}()
 	return err
 }

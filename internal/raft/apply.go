@@ -15,6 +15,10 @@ func (r *raftNode) applyLoop() {
 // 应用已提交日志
 func (r *raftNode) applyCommitEntries() {
 	for {
+		if r.applyRestoreSnapshot() {
+			continue
+		}
+
 		r.mu.Lock()
 		if r.stopped || r.lastApplied >= r.commitIndex {
 			r.mu.Unlock()
@@ -63,8 +67,20 @@ func (r *raftNode) applyCommitEntries() {
 	}
 }
 
-// 推送快照给应用层
-func (r *raftNode) publishSnapshot(snapshot Snapshot) {
+// 通过 apply loop 串行推送待恢复快照，保证 applyCh 只有一个生产者。
+func (r *raftNode) applyRestoreSnapshot() bool {
+	r.mu.RLock()
+	if r.stopped || r.restoreSnapshot.Index == 0 {
+		r.mu.RUnlock()
+		return false
+	}
+	snapshot := Snapshot{
+		Index: r.restoreSnapshot.Index,
+		Term:  r.restoreSnapshot.Term,
+		Data:  append([]byte(nil), r.restoreSnapshot.Data...),
+	}
+	r.mu.RUnlock()
+
 	msg := ApplyMsg{
 		Index:        snapshot.Index,
 		Term:         snapshot.Term,
@@ -73,6 +89,16 @@ func (r *raftNode) publishSnapshot(snapshot Snapshot) {
 	}
 	select {
 	case r.applyCh <- msg:
+		r.mu.Lock()
+		if r.restoreSnapshot.Index == snapshot.Index && r.restoreSnapshot.Term == snapshot.Term {
+			r.restoreSnapshot = Snapshot{}
+		}
+		if r.lastApplied < snapshot.Index {
+			r.lastApplied = snapshot.Index
+		}
+		r.mu.Unlock()
+		return true
 	case <-r.stopCh:
+		return false
 	}
 }

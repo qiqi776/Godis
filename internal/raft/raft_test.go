@@ -602,6 +602,84 @@ func TestReadIndexRejectedAfterFatalStepDown(t *testing.T) {
 	}
 }
 
+func TestStopClosesApplyCh(t *testing.T) {
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1"},
+		Storage:          newMemStorage(),
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  1,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	if err := node.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	select {
+	case _, ok := <-node.ApplyCh():
+		if ok {
+			t.Fatal("applyCh should be closed after stop")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("applyCh was not closed after stop")
+	}
+}
+
+func TestStopClosesApplyChWithPendingSnapshot(t *testing.T) {
+	storage := newMemStorage()
+	storage.snapshot = Snapshot{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("snapshot"),
+	}
+
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1"},
+		Storage:          storage,
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  1,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	raftNode := node.(*raftNode)
+	raftNode.applyCh <- ApplyMsg{Index: 99}
+
+	if err := node.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := node.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	msg, ok := <-node.ApplyCh()
+	if !ok {
+		t.Fatal("expected buffered message before applyCh close")
+	}
+	if msg.Index != 99 {
+		t.Fatalf("buffered msg index = %d, want 99", msg.Index)
+	}
+
+	select {
+	case _, ok := <-node.ApplyCh():
+		if ok {
+			t.Fatal("applyCh should be closed after stop")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("applyCh was not closed after stop")
+	}
+}
+
 func waitLead(t *testing.T, nodes []Node, timeout time.Duration) string {
 	t.Helper()
 
