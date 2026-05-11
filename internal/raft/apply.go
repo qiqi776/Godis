@@ -47,20 +47,28 @@ func (r *raftNode) applyCommitEntries() {
 		}
 
 		entry := entries[0]
+		r.mu.RLock()
+		if r.stopped || r.restoreSnapshot.Index > 0 || entry.Index != r.lastApplied+1 || entry.Index > r.commitIndex {
+			r.mu.RUnlock()
+			continue
+		}
 		msg := ApplyMsg{
 			Index: entry.Index,
 			Term:  entry.Term,
 			Type:  entry.Type,
 			Data:  append([]byte(nil), entry.Data...),
 		}
+		r.mu.RUnlock()
 
 		select {
 		case r.applyCh <- msg:
 			r.mu.Lock()
-			if r.lastApplied < entry.Index {
+			if r.lastApplied+1 == entry.Index {
 				r.lastApplied = entry.Index
 			}
 			r.mu.Unlock()
+		case <-r.applyNotifyCh:
+			continue
 		case <-r.stopCh:
 			return
 		}
@@ -97,6 +105,8 @@ func (r *raftNode) applyRestoreSnapshot() bool {
 			r.lastApplied = snapshot.Index
 		}
 		r.mu.Unlock()
+		return true
+	case <-r.applyNotifyCh:
 		return true
 	case <-r.stopCh:
 		return false
