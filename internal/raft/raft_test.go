@@ -680,6 +680,47 @@ func TestStopClosesApplyChWithPendingSnapshot(t *testing.T) {
 	}
 }
 
+func TestSnapshotCommitPersistFailureDoesNotAdvanceState(t *testing.T) {
+	storage := &failCommitStorage{memStorage: newMemStorage()}
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1", "node2"},
+		Storage:          storage,
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	raftNode := node.(*raftNode)
+	raftNode.currentTerm = 1
+	storage.fail = true
+
+	_, err = raftNode.HandleInstallSnapshot(context.Background(), InstallSnapshotRequest{
+		Term:              1,
+		LeaderID:          "node2",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  1,
+		Data:              []byte("snapshot"),
+	})
+	if !errors.Is(err, errInjectedHardState) {
+		t.Fatalf("install snapshot error = %v, want %v", err, errInjectedHardState)
+	}
+	if raftNode.commitIndex != 0 {
+		t.Fatalf("commitIndex = %d, want 0", raftNode.commitIndex)
+	}
+	if raftNode.lastApplied != 0 {
+		t.Fatalf("lastApplied = %d, want 0", raftNode.lastApplied)
+	}
+	if raftNode.restoreSnapshot.Index != 0 {
+		t.Fatalf("restoreSnapshot = %+v, want empty", raftNode.restoreSnapshot)
+	}
+	assertFatalStop(t, raftNode)
+}
+
 func waitLead(t *testing.T, nodes []Node, timeout time.Duration) string {
 	t.Helper()
 
@@ -882,6 +923,18 @@ var errInjectedHardState = errors.New("injected hard state failure")
 type failingHardStateStorage struct {
 	hardState HardState
 	snapshot  Snapshot
+}
+
+type failCommitStorage struct {
+	*memStorage
+	fail bool
+}
+
+func (s *failCommitStorage) SaveHardState(state HardState) error {
+	if s.fail {
+		return errInjectedHardState
+	}
+	return s.memStorage.SaveHardState(state)
 }
 
 func (s *failingHardStateStorage) SaveHardState(HardState) error {

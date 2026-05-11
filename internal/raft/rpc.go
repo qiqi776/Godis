@@ -87,8 +87,8 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 	}
 
 	if req.LeaderCommit > r.commitIndex {
-		r.commitIndex = min(req.LeaderCommit, lastIndex)
-		if err := r.persistState(); err != nil {
+		nextCommit := min(req.LeaderCommit, lastIndex)
+		if err := r.updateCommitIndexLocked(nextCommit); err != nil {
 			return AppendEntriesResponse{}, err
 		}
 		r.notifyApply()
@@ -127,19 +127,20 @@ func (r *raftNode) HandleInstallSnapshot(ctx context.Context, req InstallSnapsho
 	}
 	shouldApply := req.LastIncludedIndex > r.lastApplied
 	if shouldApply {
+		nextCommit := r.commitIndex
+		if req.LastIncludedIndex > nextCommit {
+			nextCommit = req.LastIncludedIndex
+		}
 		if err := r.storage.ApplySnapshot(snapshot); err != nil {
 			r.mu.Unlock()
 			return InstallSnapshotResponse{}, err
 		}
-		if r.commitIndex < req.LastIncludedIndex {
-			r.commitIndex = req.LastIncludedIndex
-		}
-		r.lastApplied = req.LastIncludedIndex
-		r.restoreSnapshot = snapshot
-		if err := r.persistState(); err != nil {
+		if err := r.updateCommitIndexLocked(nextCommit); err != nil {
 			r.mu.Unlock()
 			return InstallSnapshotResponse{}, err
 		}
+		r.lastApplied = req.LastIncludedIndex
+		r.restoreSnapshot = snapshot
 	}
 	term := r.currentTerm
 	r.mu.Unlock()

@@ -206,8 +206,7 @@ func (r *raftNode) advanceCommitIndex() {
 		return
 	}
 
-	r.commitIndex = majorityIndex
-	if err := r.persistState(); err != nil {
+	if err := r.updateCommitIndexLocked(majorityIndex); err != nil {
 		return
 	}
 	r.notifyApply()

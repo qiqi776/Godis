@@ -237,11 +237,26 @@ func (r *raftNode) persist(snapshot raftStateSnapshot) error {
 
 // 持久化
 func (r *raftNode) persistState() error {
+	return r.persistStateWithCommit(r.commitIndex)
+}
+
+func (r *raftNode) persistStateWithCommit(commit uint64) error {
 	return r.storage.SaveHardState(HardState{
 		CurrentTerm: r.currentTerm,
 		VotedFor:    r.votedFor,
-		Commit:      r.commitIndex,
+		Commit:      commit,
 	})
+}
+
+func (r *raftNode) updateCommitIndexLocked(nextCommit uint64) error {
+	if nextCommit <= r.commitIndex {
+		return nil
+	}
+	if err := r.persistStateWithCommit(nextCommit); err != nil {
+		return r.failNodeLocked(err)
+	}
+	r.commitIndex = nextCommit
+	return nil
 }
 
 // 重置选举计时器
