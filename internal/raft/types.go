@@ -13,6 +13,7 @@ const (
 var (
 	ErrNotLeader         = errors.New("raft: not leader")
 	ErrNodeStopped       = errors.New("raft: node stopped")
+	ErrNodeFailed        = errors.New("raft: node failed")
 	ErrInvalidConfig     = errors.New("raft: invalid config")
 	ErrEntryNotFound     = errors.New("raft: log entry not found")
 	ErrCompacted         = errors.New("raft: log entry compacted")

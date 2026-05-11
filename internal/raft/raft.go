@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -27,6 +28,7 @@ type raftNode struct {
 	state    StateType
 	leaderID string
 	stopped  bool
+	fatalErr error
 
 	currentTerm uint64
 	votedFor    string
@@ -47,6 +49,7 @@ type raftNode struct {
 	applyNotifyCh    chan struct{}
 	stopCh           chan struct{}
 	stopOnce         sync.Once
+	closeApplyOnce   sync.Once
 	restoreSnapshot  Snapshot
 }
 
@@ -108,8 +111,9 @@ func NewNode(config Config) (Node, error) {
 func (r *raftNode) Start() error {
 	r.mu.Lock()
 	if r.stopped {
+		err := r.nodeErrorLocked()
 		r.mu.Unlock()
-		return ErrNodeStopped
+		return err
 	}
 	r.mu.Unlock()
 	if r.restoreSnapshot.Index > 0 {
@@ -126,14 +130,11 @@ func (r *raftNode) Start() error {
 
 // 停止节点
 func (r *raftNode) Stop() error {
-	r.stopOnce.Do(func() {
-		r.mu.Lock()
-		r.stopped = true
-		r.mu.Unlock()
-		close(r.stopCh)
-		r.wg.Wait()
-		close(r.applyCh)
-	})
+	r.mu.Lock()
+	r.stopped = true
+	r.mu.Unlock()
+	r.signalStop()
+	r.finishStop()
 	return nil
 }
 
@@ -141,8 +142,9 @@ func (r *raftNode) Stop() error {
 func (r *raftNode) Propose(ctx context.Context, data []byte) (uint64, error) {
 	r.mu.Lock()
 	if r.stopped {
+		err := r.nodeErrorLocked()
 		r.mu.Unlock()
-		return 0, ErrNodeStopped
+		return 0, err
 	}
 	if r.state != Leader {
 		r.mu.Unlock()
@@ -187,7 +189,7 @@ func (r *raftNode) Snapshot(index uint64, data []byte) error {
 	defer r.mu.Unlock()
 
 	if r.stopped {
-		return ErrNodeStopped
+		return r.nodeErrorLocked()
 	}
 	if index == 0 || index > r.lastApplied {
 		return ErrEntryNotFound
@@ -229,4 +231,44 @@ func (r *raftNode) LeaderID() string {
 // 上层通过该通道接收已提交的日志条目和快照
 func (r *raftNode) ApplyCh() <-chan ApplyMsg {
 	return r.applyCh
+}
+
+// 发出停止信号
+func (r *raftNode) signalStop() {
+	r.stopOnce.Do(func() {
+		close(r.stopCh)
+	})
+}
+
+// 等待所有循环退出并关闭 applyCh
+func (r *raftNode) finishStop() {
+	r.wg.Wait()
+	r.closeApplyOnce.Do(func() {
+		close(r.applyCh)
+	})
+}
+
+// 返回节点错误
+func (r *raftNode) nodeErrorLocked() error {
+	if r.fatalErr != nil {
+		return errors.Join(ErrNodeStopped, ErrNodeFailed, r.fatalErr)
+	}
+	return ErrNodeStopped
+}
+
+// 处理致命错误
+func (r *raftNode) failNodeLocked(err error) error {
+	if err == nil {
+		return nil
+	}
+	if r.fatalErr == nil {
+		r.fatalErr = err
+	}
+	r.state = Follower
+	r.leaderID = ""
+	r.votedFor = ""
+	r.stopped = true
+	r.signalStop()
+	go r.finishStop()
+	return err
 }

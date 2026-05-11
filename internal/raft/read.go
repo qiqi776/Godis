@@ -25,7 +25,7 @@ func (r *raftNode) ReadIndex(ctx context.Context) (uint64, error) {
 				r.mu.RLock()
 				defer r.mu.RUnlock()
 				if r.stopped {
-					return 0, ErrNodeStopped
+					return 0, r.nodeErrorLocked()
 				}
 				if r.state != Leader || r.currentTerm != term {
 					return 0, ErrNotLeader
@@ -44,7 +44,10 @@ func (r *raftNode) ReadIndex(ctx context.Context) (uint64, error) {
 			return 0, ctx.Err()
 		case <-r.stopCh:
 			stop(timer)
-			return 0, ErrNodeStopped
+			r.mu.RLock()
+			err := r.nodeErrorLocked()
+			r.mu.RUnlock()
+			return 0, err
 		}
 	}
 }
@@ -52,8 +55,9 @@ func (r *raftNode) ReadIndex(ctx context.Context) (uint64, error) {
 func (r *raftNode) readState() (uint64, uint64, bool, error) {
 	r.mu.RLock()
 	if r.stopped {
+		err := r.nodeErrorLocked()
 		r.mu.RUnlock()
-		return 0, 0, false, ErrNodeStopped
+		return 0, 0, false, err
 	}
 	if r.state != Leader {
 		r.mu.RUnlock()
@@ -76,8 +80,9 @@ func (r *raftNode) readState() (uint64, uint64, bool, error) {
 func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 	r.mu.RLock()
 	if r.stopped {
+		err := r.nodeErrorLocked()
 		r.mu.RUnlock()
-		return ErrNodeStopped
+		return err
 	}
 	if r.state != Leader || r.currentTerm != term {
 		r.mu.RUnlock()
@@ -127,7 +132,9 @@ func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 		case result := <-results:
 			remain--
 			if result.term > term {
-				r.stepDown(result.term, "")
+				if err := r.stepDown(result.term, ""); err != nil {
+					return err
+				}
 				return ErrNotLeader
 			}
 			if result.ok {
@@ -139,7 +146,10 @@ func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-r.stopCh:
-			return ErrNodeStopped
+			r.mu.RLock()
+			err := r.nodeErrorLocked()
+			r.mu.RUnlock()
+			return err
 		}
 	}
 

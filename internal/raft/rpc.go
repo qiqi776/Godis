@@ -6,8 +6,9 @@ func (r *raftNode) HandleRequestVote(ctx context.Context, req RequestVoteRequest
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stopped {
-		return RequestVoteResponse{}, ErrNodeStopped
+		return RequestVoteResponse{}, r.nodeErrorLocked()
 	}
+	// 收到更高 Term
 	if req.Term < r.currentTerm {
 		return RequestVoteResponse{
 			Term:        r.currentTerm,
@@ -15,12 +16,7 @@ func (r *raftNode) HandleRequestVote(ctx context.Context, req RequestVoteRequest
 		}, nil
 	}
 	if req.Term > r.currentTerm {
-		prev := r.snapshotState()
-		r.state = Follower
-		r.currentTerm = req.Term
-		r.votedFor = ""
-		r.leaderID = ""
-		if err := r.persist(prev); err != nil {
+		if err := r.stepDownLocked(req.Term, ""); err != nil {
 			return RequestVoteResponse{}, err
 		}
 	}
@@ -53,7 +49,7 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stopped {
-		return AppendEntriesResponse{}, ErrNodeStopped
+		return AppendEntriesResponse{}, r.nodeErrorLocked()
 	}
 	if req.Term < r.currentTerm {
 		return AppendEntriesResponse{
@@ -62,12 +58,7 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 		}, nil
 	}
 	if req.Term > r.currentTerm {
-		prev := r.snapshotState()
-		r.state = Follower
-		r.leaderID = ""
-		r.currentTerm = req.Term
-		r.votedFor = ""
-		if err := r.persist(prev); err != nil {
+		if err := r.stepDownLocked(req.Term, ""); err != nil {
 			return AppendEntriesResponse{}, err
 		}
 	}
@@ -113,7 +104,7 @@ func (r *raftNode) HandleInstallSnapshot(ctx context.Context, req InstallSnapsho
 	r.mu.Lock()
 	if r.stopped {
 		r.mu.Unlock()
-		return InstallSnapshotResponse{}, ErrNodeStopped
+		return InstallSnapshotResponse{}, r.nodeErrorLocked()
 	}
 	if req.Term < r.currentTerm {
 		term := r.currentTerm
@@ -121,12 +112,7 @@ func (r *raftNode) HandleInstallSnapshot(ctx context.Context, req InstallSnapsho
 		return InstallSnapshotResponse{Term: term}, nil
 	}
 	if req.Term > r.currentTerm {
-		prev := r.snapshotState()
-		r.state = Follower
-		r.leaderID = ""
-		r.currentTerm = req.Term
-		r.votedFor = ""
-		if err := r.persist(prev); err != nil {
+		if err := r.stepDownLocked(req.Term, ""); err != nil {
 			r.mu.Unlock()
 			return InstallSnapshotResponse{}, err
 		}

@@ -496,7 +496,8 @@ func TestVoteTermRollback(t *testing.T) {
 		t.Fatalf("request vote error = %v, want %v", err, errInjectedHardState)
 	}
 
-	assertState(t, node, Leader, 4, node.id, node.id)
+	assertState(t, node, Follower, 5, "", "")
+	assertFatalStop(t, node)
 }
 
 func TestVoteGrantRollback(t *testing.T) {
@@ -533,8 +534,8 @@ func TestAppendTermRollback(t *testing.T) {
 	if !errors.Is(err, errInjectedHardState) {
 		t.Fatalf("append entries error = %v, want %v", err, errInjectedHardState)
 	}
-
-	assertState(t, node, Candidate, 4, node.id, "")
+	assertState(t, node, Follower, 5, "", "")
+	assertFatalStop(t, node)
 }
 
 func TestSnapTermRollback(t *testing.T) {
@@ -553,8 +554,8 @@ func TestSnapTermRollback(t *testing.T) {
 	if !errors.Is(err, errInjectedHardState) {
 		t.Fatalf("install snapshot error = %v, want %v", err, errInjectedHardState)
 	}
-
-	assertState(t, node, Candidate, 4, node.id, "")
+	assertState(t, node, Follower, 5, "", "")
+	assertFatalStop(t, node)
 }
 
 func TestStepDownRollback(t *testing.T) {
@@ -564,9 +565,41 @@ func TestStepDownRollback(t *testing.T) {
 	node.votedFor = node.id
 	node.leaderID = node.id
 
-	node.stepDown(5, "node2")
+	err := node.stepDown(5, "node2")
+	if !errors.Is(err, errInjectedHardState) {
+		t.Fatalf("step down error = %v, want %v", err, errInjectedHardState)
+	}
 
-	assertState(t, node, Leader, 4, node.id, node.id)
+	assertState(t, node, Follower, 5, "", "")
+	assertFatalStop(t, node)
+
+	if _, err := node.Propose(context.Background(), []byte("cmd")); !errors.Is(err, ErrNodeStopped) {
+		t.Fatalf("propose after fatal stop error = %v, want %v", err, ErrNodeStopped)
+	}
+	if !errors.Is(node.fatalErr, errInjectedHardState) {
+		t.Fatalf("fatalErr = %v, want %v", node.fatalErr, errInjectedHardState)
+	}
+}
+
+func TestReadIndexRejectedAfterFatalStepDown(t *testing.T) {
+	node := newFailNode(t)
+	node.state = Leader
+	node.currentTerm = 4
+	node.votedFor = node.id
+	node.leaderID = node.id
+
+	err := node.stepDown(5, "node2")
+	if !errors.Is(err, errInjectedHardState) {
+		t.Fatalf("step down error = %v, want %v", err, errInjectedHardState)
+	}
+
+	_, err = node.ReadIndex(context.Background())
+	if !errors.Is(err, ErrNodeStopped) {
+		t.Fatalf("read index after fatal stop error = %v, want %v", err, ErrNodeStopped)
+	}
+	if !errors.Is(err, errInjectedHardState) {
+		t.Fatalf("read index after fatal stop error = %v, want %v", err, errInjectedHardState)
+	}
 }
 
 func waitLead(t *testing.T, nodes []Node, timeout time.Duration) string {
@@ -854,6 +887,23 @@ func assertState(t *testing.T, node *raftNode, state StateType, term uint64, vot
 	}
 	if node.leaderID != leaderID {
 		t.Fatalf("leaderID = %q, want %q", node.leaderID, leaderID)
+	}
+}
+
+func assertFatalStop(t *testing.T, node *raftNode) {
+	t.Helper()
+
+	if !node.stopped {
+		t.Fatalf("node should be stopped after fatal hard-state failure")
+	}
+	if !errors.Is(node.nodeErrorLocked(), ErrNodeStopped) {
+		t.Fatalf("node error = %v, want %v", node.nodeErrorLocked(), ErrNodeStopped)
+	}
+	if !errors.Is(node.nodeErrorLocked(), ErrNodeFailed) {
+		t.Fatalf("node error = %v, want %v", node.nodeErrorLocked(), ErrNodeFailed)
+	}
+	if !errors.Is(node.nodeErrorLocked(), errInjectedHardState) {
+		t.Fatalf("node error = %v, want %v", node.nodeErrorLocked(), errInjectedHardState)
 	}
 }
 

@@ -134,7 +134,7 @@ func (r *raftNode) Election() {
 		case result := <-results:
 			remain--
 			if result.term > term {
-				r.stepDown(result.term, "")
+				_ = r.stepDown(result.term, "")
 				return
 			}
 			if !result.granted {
@@ -184,23 +184,29 @@ func (r *raftNode) beLeader(term uint64) {
 	go r.replicateAll()
 }
 
-// 节点收到比当前大的 Term，执行降级
-func (r *raftNode) stepDown(term uint64, leaderID string) {
+// 节点收到比当前大的 Term，直接降级
+func (r *raftNode) stepDown(term uint64, leaderID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.stepDownLocked(term, leaderID)
+}
+
+// 节点降级内部方法
+func (r *raftNode) stepDownLocked(term uint64, leaderID string) error {
 	if term <= r.currentTerm {
-		return
+		return nil
 	}
 
-	prev := r.snapshotState()
 	r.state = Follower
 	r.leaderID = leaderID
 	r.currentTerm = term
 	r.votedFor = ""
-	if err := r.persist(prev); err != nil {
-		return
+	// 如果持久化失败，记录错误
+	if err := r.persistState(); err != nil {
+		return r.failNodeLocked(err)
 	}
 	r.resetElectionTimer()
+	return nil
 }
 
 // 状态快照与恢复
