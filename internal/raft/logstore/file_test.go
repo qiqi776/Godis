@@ -2,6 +2,8 @@ package logstore
 
 import (
 	"context"
+	"encoding/binary"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -398,5 +400,125 @@ func TestRestartVote(t *testing.T) {
 	}
 	if resp.Term != 1 {
 		t.Fatalf("term = %d, want 1", resp.Term)
+	}
+}
+
+func TestReplayTruncatesPartialTailRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raft.wal")
+
+	storage, err := OpenFileStorage(path)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+
+	if err := storage.Append([]raft.LogEntry{
+		{Index: 1, Term: 1, Type: raft.EntryNormal, Data: []byte("a")},
+		{Index: 2, Term: 1, Type: raft.EntryNormal, Data: []byte("b")},
+	}); err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+	if err := storage.SaveHardState(raft.HardState{
+		CurrentTerm: 1,
+		VotedFor:    "node1",
+		Commit:      2,
+	}); err != nil {
+		t.Fatalf("save hard state: %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("close storage: %v", err)
+	}
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat before append: %v", err)
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open raw wal: %v", err)
+	}
+	header := make([]byte, 16)
+	binary.LittleEndian.PutUint32(header[:4], 64)
+	binary.LittleEndian.PutUint32(header[4:8], 0xdeadbeef)
+	binary.LittleEndian.PutUint64(header[8:], uint64(before.Size()))
+	if _, err := f.Write(header); err != nil {
+		t.Fatalf("write partial header: %v", err)
+	}
+	if _, err := f.Write([]byte(`{"type":"append"`)); err != nil {
+		t.Fatalf("write partial payload: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close raw wal: %v", err)
+	}
+
+	recovered, err := OpenFileStorage(path)
+	if err != nil {
+		t.Fatalf("reopen storage: %v", err)
+	}
+	defer recovered.Close()
+
+	lastIndex, err := recovered.LastIndex()
+	if err != nil {
+		t.Fatalf("last index: %v", err)
+	}
+	if lastIndex != 2 {
+		t.Fatalf("last index = %d, want 2", lastIndex)
+	}
+
+	state, err := recovered.LoadHardState()
+	if err != nil {
+		t.Fatalf("load hard state: %v", err)
+	}
+	if state.Commit != 2 {
+		t.Fatalf("commit = %d, want 2", state.Commit)
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after reopen: %v", err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("wal size after recovery = %d, want %d", after.Size(), before.Size())
+	}
+}
+
+func TestReplayRejectsCorruptMiddleRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raft.wal")
+
+	storage, err := OpenFileStorage(path)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+
+	if err := storage.SaveHardState(raft.HardState{
+		CurrentTerm: 2,
+		VotedFor:    "node1",
+		Commit:      0,
+	}); err != nil {
+		t.Fatalf("save hard state: %v", err)
+	}
+	if err := storage.Append([]raft.LogEntry{
+		{Index: 1, Term: 2, Type: raft.EntryNormal, Data: []byte("a")},
+	}); err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("close storage: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	if len(data) < 16+1 {
+		t.Fatalf("wal too short: %d", len(data))
+	}
+	data[16] ^= 0xff
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("rewrite wal: %v", err)
+	}
+
+	if _, err := OpenFileStorage(path); err == nil {
+		t.Fatal("reopen should fail on corrupt middle record")
 	}
 }

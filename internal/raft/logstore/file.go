@@ -1,8 +1,11 @@
 package logstore
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +21,12 @@ const (
 	fileStorageRecordTruncatePrefix = "truncate_prefix"
 	fileStorageRecordSaveSnapshot   = "save_snapshot"
 	fileStorageRecordApplySnapshot  = "apply_snapshot"
+	fileStorageRecordHeaderSize     = 16
+)
+
+var (
+	fileStorageCRCTable = crc32.MakeTable(crc32.Castagnoli)
+	errPartialWALRecord = errors.New("partial wal record")
 )
 
 type FileStorage struct {
@@ -296,22 +305,69 @@ func (s *FileStorage) replayLocked() error {
 		return err
 	}
 
-	decoder := json.NewDecoder(s.file)
-	for {
-		var record fileStorageRecord
-		if err := decoder.Decode(&record); err != nil {
-			if err == io.EOF {
+	stat, err := s.file.Stat()
+	if err != nil {
+		return err
+	}
+
+	fileSize := stat.Size()
+	recordOffset := int64(0)
+	header := make([]byte, fileStorageRecordHeaderSize)
+
+	for recordOffset < fileSize {
+		if _, err := io.ReadFull(s.file, header); err != nil {
+			if isPartialWALRead(err) {
+				if err := s.truncateReplayTailLocked(recordOffset); err != nil {
+					return err
+				}
 				break
 			}
-			return fmt.Errorf("replay raft wal: %w", err)
+			return fmt.Errorf("replay raft wal at offset %d: %w", recordOffset, err)
 		}
 
+		payloadLen := int64(binary.LittleEndian.Uint32(header[:4]))
+		expectedCRC := binary.LittleEndian.Uint32(header[4:8])
+		storedOffset := int64(binary.LittleEndian.Uint64(header[8:]))
+		if storedOffset != recordOffset {
+			return fmt.Errorf("replay raft wal at offset %d: offset mismatch", recordOffset)
+		}
+		payloadEnd := recordOffset + fileStorageRecordHeaderSize + payloadLen
+		if payloadLen == 0 {
+			return fmt.Errorf("replay raft wal at offset %d: empty record", recordOffset)
+		}
+		if payloadEnd > fileSize {
+			if err := s.truncateReplayTailLocked(recordOffset); err != nil {
+				return err
+			}
+			break
+		}
+
+		payload := make([]byte, payloadLen)
+		if _, err := io.ReadFull(s.file, payload); err != nil {
+			if isPartialWALRead(err) {
+				if err := s.truncateReplayTailLocked(recordOffset); err != nil {
+					return err
+				}
+				break
+			}
+			return fmt.Errorf("replay raft wal at offset %d: %w", recordOffset, err)
+		}
+		if crc32.Checksum(payload, fileStorageCRCTable) != expectedCRC {
+			return fmt.Errorf("replay raft wal at offset %d: crc mismatch", recordOffset)
+		}
+
+		var record fileStorageRecord
+		if err := json.Unmarshal(payload, &record); err != nil {
+			return fmt.Errorf("replay raft wal at offset %d: %w", recordOffset, err)
+		}
 		if err := s.applyRecordLocked(record); err != nil {
 			return err
 		}
+
+		recordOffset = payloadEnd
 	}
 
-	_, err := s.file.Seek(0, io.SeekEnd)
+	_, err = s.file.Seek(0, io.SeekEnd)
 	return err
 }
 
@@ -390,12 +446,42 @@ func (s *FileStorage) writeRecordLocked(record fileStorageRecord) error {
 	if err != nil {
 		return err
 	}
+	if uint64(len(data)) > uint64(^uint32(0)) {
+		return fmt.Errorf("raft wal record too large: %d", len(data))
+	}
 
-	if _, err := s.file.Write(append(data, '\n')); err != nil {
+	recordOffset, err := s.file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+
+	header := make([]byte, fileStorageRecordHeaderSize)
+	binary.LittleEndian.PutUint32(header[:4], uint32(len(data)))
+	binary.LittleEndian.PutUint32(header[4:8], crc32.Checksum(data, fileStorageCRCTable))
+	binary.LittleEndian.PutUint64(header[8:], uint64(recordOffset))
+
+	if _, err := s.file.Write(header); err != nil {
+		return err
+	}
+	if _, err := s.file.Write(data); err != nil {
 		return err
 	}
 
 	return s.file.Sync()
+}
+
+func (s *FileStorage) truncateReplayTailLocked(offset int64) error {
+	if err := s.file.Truncate(offset); err != nil {
+		return err
+	}
+	if _, err := s.file.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+	return s.file.Sync()
+}
+
+func isPartialWALRead(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func initialLogEntries() []raft.LogEntry {
