@@ -522,3 +522,50 @@ func TestReplayRejectsCorruptMiddleRecord(t *testing.T) {
 		t.Fatal("reopen should fail on corrupt middle record")
 	}
 }
+
+func TestFileApplySnapshotSameIndexIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raft.wal")
+
+	storage, err := OpenFileStorage(path)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer storage.Close()
+
+	snapshot := raft.Snapshot{
+		Index: 5,
+		Term:  3,
+		Data:  []byte("remote-snapshot"),
+	}
+	if err := storage.ApplySnapshot(snapshot); err != nil {
+		t.Fatalf("apply snapshot: %v", err)
+	}
+	if err := storage.ApplySnapshot(snapshot); err != nil {
+		t.Fatalf("reapply snapshot: %v", err)
+	}
+}
+
+func TestFileApplySnapshotSameIndexConflict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raft.wal")
+
+	storage, err := OpenFileStorage(path)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer storage.Close()
+
+	if err := storage.ApplySnapshot(raft.Snapshot{
+		Index: 5,
+		Term:  3,
+		Data:  []byte("remote-snapshot"),
+	}); err != nil {
+		t.Fatalf("apply snapshot: %v", err)
+	}
+	if err := storage.ApplySnapshot(raft.Snapshot{
+		Index: 5,
+		Term:  4,
+		Data:  []byte("different"),
+	}); err != raft.ErrStorageConflict {
+		t.Fatalf("conflicting snapshot error = %v, want %v", err, raft.ErrStorageConflict)
+	}
+}

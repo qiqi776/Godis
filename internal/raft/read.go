@@ -2,13 +2,17 @@ package raft
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
 type readConfirmResult struct {
-	term uint64
-	ok   bool
+	term        uint64
+	ok          bool
+	readContext uint64
 }
+
+var readContextSeq atomic.Uint64
 
 func (r *raftNode) ReadIndex(ctx context.Context) (uint64, error) {
 	if ctx == nil {
@@ -98,6 +102,11 @@ func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 		return nil
 	}
 
+	readContext := readContextSeq.Add(1)
+	if readContext == 0 {
+		readContext = readContextSeq.Add(1)
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -108,7 +117,7 @@ func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 		}
 
 		go func(target string) {
-			req, ok := r.buildReadIndexRequest(target, term)
+			req, ok := r.buildReadIndexRequest(term, readContext)
 			if !ok {
 				results <- readConfirmResult{}
 				return
@@ -119,8 +128,9 @@ func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 				return
 			}
 			results <- readConfirmResult{
-				term: resp.Term,
-				ok:   resp.Success,
+				term:        resp.Term,
+				ok:          resp.Success,
+				readContext: resp.ReadContext,
 			}
 		}(peer)
 	}
@@ -137,7 +147,7 @@ func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 				}
 				return ErrNotLeader
 			}
-			if result.ok {
+			if result.ok && result.readContext == readContext {
 				acks++
 				if acks >= quorum {
 					return nil
@@ -156,29 +166,18 @@ func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 	return ErrReadIndexNotReady
 }
 
-func (r *raftNode) buildReadIndexRequest(peer string, term uint64) (AppendEntriesRequest, bool) {
+func (r *raftNode) buildReadIndexRequest(term uint64, readContext uint64) (AppendEntriesRequest, bool) {
 	r.mu.RLock()
 	if r.stopped || r.state != Leader || r.currentTerm != term {
 		r.mu.RUnlock()
 		return AppendEntriesRequest{}, false
 	}
-
-	nextIndex := r.nextIndex[peer]
-	if nextIndex == 0 {
-		nextIndex = 1
-	}
 	req := AppendEntriesRequest{
 		Term:         r.currentTerm,
 		LeaderID:     r.id,
-		PrevLogIndex: nextIndex - 1,
 		LeaderCommit: r.commitIndex,
+		ReadContext:  readContext,
 	}
 	r.mu.RUnlock()
-
-	prevTerm, err := r.storage.Term(req.PrevLogIndex)
-	if err != nil {
-		return AppendEntriesRequest{}, false
-	}
-	req.PrevLogTerm = prevTerm
 	return req, true
 }

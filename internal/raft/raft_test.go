@@ -383,6 +383,69 @@ func TestReadIndexReady(t *testing.T) {
 	}
 }
 
+func TestReadIndexWithLaggingFollowerUsesHeartbeatPath(t *testing.T) {
+	transport := NewFakeTransport()
+
+	leaderStorage := newMemStorage()
+	if err := leaderStorage.Append([]LogEntry{
+		{Index: 1, Term: 2, Type: EntryNormal, Data: []byte("a")},
+		{Index: 2, Term: 2, Type: EntryNormal, Data: []byte("b")},
+		{Index: 3, Term: 2, Type: EntryNormal, Data: []byte("c")},
+	}); err != nil {
+		t.Fatalf("append leader entries: %v", err)
+	}
+	leader, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1", "node2"},
+		Storage:          leaderStorage,
+		Transport:        transport,
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new leader: %v", err)
+	}
+
+	follower, err := NewNode(Config{
+		ID:               "node2",
+		Peers:            []string{"node1", "node2"},
+		Storage:          newMemStorage(),
+		Transport:        transport,
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new follower: %v", err)
+	}
+	transport.Register("node2", follower.(RPCHandler))
+
+	leaderNode := leader.(*raftNode)
+	leaderNode.state = Leader
+	leaderNode.currentTerm = 2
+	leaderNode.votedFor = leaderNode.id
+	leaderNode.leaderID = leaderNode.id
+	leaderNode.commitIndex = 3
+	leaderNode.lastApplied = 3
+	leaderNode.nextIndex["node2"] = 4
+	leaderNode.matchIndex["node1"] = 3
+
+	followerNode := follower.(*raftNode)
+	followerNode.currentTerm = 2
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	index, err := leader.ReadIndex(ctx)
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	if index != 3 {
+		t.Fatalf("read index = %d, want 3", index)
+	}
+}
+
 func TestVoteStale(t *testing.T) {
 	storage := newMemStorage()
 	if err := storage.Append([]LogEntry{
@@ -817,6 +880,16 @@ func (n *partitionNetwork) cut(id string) {
 		}
 		n.blocked[partitionLink{from: id, to: peer}] = struct{}{}
 		n.blocked[partitionLink{from: peer, to: id}] = struct{}{}
+	}
+}
+
+func (n *partitionNetwork) heal(id string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for link := range n.blocked {
+		if link.from == id || link.to == id {
+			delete(n.blocked, link)
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package logstore
 
 import (
+	"bytes"
 	"sync"
 
 	"mini-kv/internal/raft"
@@ -190,6 +191,12 @@ func (s *MemoryStorage) ApplySnapshot(snapshot raft.Snapshot) error {
 	}
 	if snapshot.Index < s.snapshot.Index {
 		return raft.ErrCompacted
+	}
+	if snapshot.Index == s.snapshot.Index && s.snapshot.Index != 0 {
+		if s.snapshot.Term != snapshot.Term || !bytes.Equal(s.snapshot.Data, snapshot.Data) {
+			return raft.ErrStorageConflict
+		}
+		return nil
 	}
 
 	s.snapshot = cloneSnapshot(snapshot)

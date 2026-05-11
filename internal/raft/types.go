@@ -88,11 +88,13 @@ type AppendEntriesRequest struct {
 	PrevLogTerm  uint64
 	Entries      []LogEntry
 	LeaderCommit uint64
+	ReadContext  uint64
 }
 
 type AppendEntriesResponse struct {
-	Term    uint64
-	Success bool
+	Term        uint64
+	Success     bool
+	ReadContext uint64
 }
 
 type InstallSnapshotRequest struct {

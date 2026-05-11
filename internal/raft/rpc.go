@@ -67,11 +67,20 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 	r.leaderID = req.LeaderID
 	r.resetElectionTimer()
 
+	if req.ReadContext != 0 {
+		return AppendEntriesResponse{
+			Term:        r.currentTerm,
+			Success:     true,
+			ReadContext: req.ReadContext,
+		}, nil
+	}
+
 	prevTerm, err := r.storage.Term(req.PrevLogIndex)
 	if err != nil || prevTerm != req.PrevLogTerm {
 		return AppendEntriesResponse{
-			Term:    r.currentTerm,
-			Success: false,
+			Term:        r.currentTerm,
+			Success:     false,
+			ReadContext: req.ReadContext,
 		}, nil
 	}
 
@@ -95,8 +104,9 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 	}
 
 	return AppendEntriesResponse{
-		Term:    r.currentTerm,
-		Success: true,
+		Term:        r.currentTerm,
+		Success:     true,
+		ReadContext: req.ReadContext,
 	}, nil
 }
 
