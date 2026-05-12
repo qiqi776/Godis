@@ -196,6 +196,7 @@ func (t *Transport) call(ctx context.Context, target string, method string, req 
 		return err
 	case <-ctx.Done():
 		_ = client.Close()
+		<-done
 		return ctx.Err()
 	}
 }

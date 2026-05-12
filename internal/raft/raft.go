@@ -47,6 +47,7 @@ type raftNode struct {
 	heartbeatTimeout time.Duration
 	resetElectionCh  chan struct{}
 	applyNotifyCh    chan struct{}
+	replicateNotify  map[string]chan struct{}
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 	restoreSnapshot  Snapshot
@@ -94,6 +95,7 @@ func NewNode(config Config) (Node, error) {
 		heartbeatTimeout: config.HeartbeatTimeout,
 		resetElectionCh:  make(chan struct{}, 1),
 		applyNotifyCh:    make(chan struct{}, 1),
+		replicateNotify:  make(map[string]chan struct{}),
 		stopCh:           make(chan struct{}),
 		restoreSnapshot:  snapshot,
 	}
@@ -101,6 +103,9 @@ func NewNode(config Config) (Node, error) {
 	for _, peer := range node.peers {
 		node.nextIndex[peer] = lastIndex + 1
 		node.matchIndex[peer] = 0
+		if peer != node.id {
+			node.replicateNotify[peer] = make(chan struct{}, 1)
+		}
 	}
 	node.matchIndex[node.id] = lastIndex
 	return node, nil
@@ -116,10 +121,18 @@ func (r *raftNode) Start() error {
 	}
 	r.mu.Unlock()
 
-	r.wg.Add(3)
+	r.wg.Add(3 + len(r.replicateNotify))
 	go func() { defer r.wg.Done(); r.electionLoop() }()
 	go func() { defer r.wg.Done(); r.heartbeatLoop() }()
 	go func() { defer r.wg.Done(); r.applyLoop() }()
+	for peer, notifyCh := range r.replicateNotify {
+		peer := peer
+		notifyCh := notifyCh
+		go func() {
+			defer r.wg.Done()
+			r.replicationWorker(peer, notifyCh)
+		}()
+	}
 	r.notifyApply()
 	return nil
 }

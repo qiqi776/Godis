@@ -991,6 +991,366 @@ func waitOtherLead(t *testing.T, nodes map[string]Node, excluded string, timeout
 	return ""
 }
 
+func TestAppendEntriesRejectReportsConflictHint(t *testing.T) {
+	tests := []struct {
+		name         string
+		terms        []uint64
+		prevLogIndex uint64
+		prevLogTerm  uint64
+		wantIndex    uint64
+		wantTerm     uint64
+		requestTerm  uint64
+	}{
+		{
+			name:         "missing entry",
+			terms:        []uint64{1, 1},
+			prevLogIndex: 4,
+			prevLogTerm:  2,
+			wantIndex:    3,
+			requestTerm:  2,
+		},
+		{
+			name:         "term mismatch",
+			terms:        []uint64{1, 2, 2, 2, 3},
+			prevLogIndex: 4,
+			prevLogTerm:  9,
+			wantIndex:    2,
+			wantTerm:     2,
+			requestTerm:  4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := newMemStorage()
+			appendTerms(t, storage, tt.terms...)
+			node := newTestNode(t, "node1", storage, NewFakeTransport())
+
+			resp, err := node.(RPCHandler).HandleAppendEntries(context.Background(), AppendEntriesRequest{
+				Term:         tt.requestTerm,
+				LeaderID:     "node2",
+				PrevLogIndex: tt.prevLogIndex,
+				PrevLogTerm:  tt.prevLogTerm,
+			})
+			if err != nil {
+				t.Fatalf("append entries: %v", err)
+			}
+			if resp.Success {
+				t.Fatal("append entries should fail")
+			}
+			if resp.ConflictIndex != tt.wantIndex || resp.ConflictTerm != tt.wantTerm {
+				t.Fatalf("conflict hint = (%d,%d), want (%d,%d)",
+					resp.ConflictIndex, resp.ConflictTerm, tt.wantIndex, tt.wantTerm)
+			}
+		})
+	}
+}
+
+func TestDecreaseNextIndexUsesConflictHint(t *testing.T) {
+	tests := []struct {
+		name      string
+		terms     []uint64
+		term      uint64
+		nextIndex uint64
+		resp      AppendEntriesResponse
+		wantNext  uint64
+	}{
+		{
+			name:      "skip known conflict term",
+			terms:     []uint64{1, 2, 2, 3, 4, 4, 5},
+			term:      5,
+			nextIndex: 8,
+			resp:      AppendEntriesResponse{ConflictIndex: 5, ConflictTerm: 4},
+			wantNext:  7,
+		},
+		{
+			name:      "use conflict index when term is absent",
+			terms:     []uint64{1, 2, 3, 4},
+			term:      4,
+			nextIndex: 5,
+			resp:      AppendEntriesResponse{ConflictIndex: 2, ConflictTerm: 9},
+			wantNext:  2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := newMemStorage()
+			appendTerms(t, storage, tt.terms...)
+			raftNode := newLeaderNode(t, storage, tt.term)
+			raftNode.nextIndex["node2"] = tt.nextIndex
+
+			if ok := raftNode.decreaseNextIndex("node2", tt.term, tt.resp); !ok {
+				t.Fatal("decreaseNextIndex should continue replication")
+			}
+			if raftNode.nextIndex["node2"] != tt.wantNext {
+				t.Fatalf("nextIndex = %d, want %d", raftNode.nextIndex["node2"], tt.wantNext)
+			}
+		})
+	}
+}
+
+func TestReplicationWorkerCoalescesInflightRequests(t *testing.T) {
+	storage := newMemStorage()
+	appendTerms(t, storage, 1)
+
+	transport := newBlockingAppendTransport()
+	node := newTestNode(t, "node1", storage, transport)
+	defer node.Stop()
+
+	raftNode := becomeLeader(node, 1)
+	raftNode.nextIndex["node2"] = 1
+	raftNode.matchIndex["node1"] = 1
+	startReplicationWorker(raftNode, "node2")
+
+	raftNode.notifyReplication("node2")
+	raftNode.notifyReplication("node2")
+	raftNode.notifyReplication("node2")
+
+	transport.waitStarted(t, time.Second)
+	time.Sleep(20 * time.Millisecond)
+
+	calls, maxConcurrent := transport.stats()
+	if calls != 1 {
+		t.Fatalf("append call count while inflight = %d, want 1", calls)
+	}
+	if maxConcurrent != 1 {
+		t.Fatalf("max concurrent append calls = %d, want 1", maxConcurrent)
+	}
+
+	transport.release()
+}
+
+func TestReplicationWorkerBatchesBacklog(t *testing.T) {
+	leaderStorage := newMemStorage()
+	entryCount := replicationBatchSize*2 + 7
+	appendRepeatedTerm(t, leaderStorage, entryCount, 1)
+
+	followerStorage := newMemStorage()
+	baseTransport := NewFakeTransport()
+	follower := newTestNode(t, "node2", followerStorage, baseTransport)
+	defer follower.Stop()
+	baseTransport.Register("node2", follower.(RPCHandler))
+
+	transport := &recordingTransport{delegate: baseTransport}
+	leader := newTestNode(t, "node1", leaderStorage, transport)
+	defer leader.Stop()
+
+	leaderNode := becomeLeader(leader, 1)
+	leaderNode.nextIndex["node2"] = 1
+	leaderNode.matchIndex["node1"] = uint64(entryCount)
+	startReplicationWorker(leaderNode, "node2")
+
+	leaderNode.notifyReplication("node2")
+
+	waitForCondition(t, time.Second, func() bool {
+		lastIndex, err := followerStorage.LastIndex()
+		return err == nil && lastIndex == uint64(entryCount)
+	})
+
+	batches := transport.entryBatchSizes()
+	positiveBatches := 0
+	for _, batchSize := range batches {
+		if batchSize == 0 {
+			continue
+		}
+		positiveBatches++
+		if batchSize > replicationBatchSize {
+			t.Fatalf("batch size = %d, want <= %d", batchSize, replicationBatchSize)
+		}
+	}
+	if positiveBatches < 3 {
+		t.Fatalf("positive batch count = %d, want at least 3", positiveBatches)
+	}
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not satisfied before timeout")
+}
+
+func newTestNode(t *testing.T, id string, storage Storage, transport Transport) Node {
+	t.Helper()
+
+	node, err := NewNode(Config{
+		ID:               id,
+		Peers:            []string{"node1", "node2"},
+		Storage:          storage,
+		Transport:        transport,
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node %s: %v", id, err)
+	}
+	return node
+}
+
+func newLeaderNode(t *testing.T, storage Storage, term uint64) *raftNode {
+	t.Helper()
+	return becomeLeader(newTestNode(t, "node1", storage, NewFakeTransport()), term)
+}
+
+func becomeLeader(node Node, term uint64) *raftNode {
+	raftNode := node.(*raftNode)
+	raftNode.state = Leader
+	raftNode.currentTerm = term
+	raftNode.votedFor = raftNode.id
+	raftNode.leaderID = raftNode.id
+	return raftNode
+}
+
+func startReplicationWorker(node *raftNode, peer string) {
+	node.wg.Add(1)
+	go func() {
+		defer node.wg.Done()
+		node.replicationWorker(peer, node.replicateNotify[peer])
+	}()
+}
+
+func appendTerms(t *testing.T, storage *memStorage, terms ...uint64) {
+	t.Helper()
+
+	entries := make([]LogEntry, 0, len(terms))
+	for i, term := range terms {
+		entries = append(entries, LogEntry{
+			Index: uint64(i + 1),
+			Term:  term,
+			Type:  EntryNormal,
+			Data:  []byte("x"),
+		})
+	}
+	if err := storage.Append(entries); err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+}
+
+func appendRepeatedTerm(t *testing.T, storage *memStorage, count int, term uint64) {
+	t.Helper()
+
+	entries := make([]LogEntry, 0, count)
+	for i := 0; i < count; i++ {
+		entries = append(entries, LogEntry{
+			Index: uint64(i + 1),
+			Term:  term,
+			Type:  EntryNormal,
+			Data:  []byte("x"),
+		})
+	}
+	if err := storage.Append(entries); err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+}
+
+type blockingAppendTransport struct {
+	mu                sync.Mutex
+	started           chan struct{}
+	releaseCh         chan struct{}
+	appendCount       int
+	concurrent        int
+	maxConcurrentSeen int
+}
+
+func newBlockingAppendTransport() *blockingAppendTransport {
+	return &blockingAppendTransport{
+		started:   make(chan struct{}, 1),
+		releaseCh: make(chan struct{}),
+	}
+}
+
+func (t *blockingAppendTransport) RequestVote(ctx context.Context, target string, req RequestVoteRequest) (RequestVoteResponse, error) {
+	return RequestVoteResponse{}, ErrNodeStopped
+}
+
+func (t *blockingAppendTransport) AppendEntries(ctx context.Context, target string, req AppendEntriesRequest) (AppendEntriesResponse, error) {
+	t.mu.Lock()
+	t.appendCount++
+	t.concurrent++
+	if t.concurrent > t.maxConcurrentSeen {
+		t.maxConcurrentSeen = t.concurrent
+	}
+	t.mu.Unlock()
+
+	select {
+	case t.started <- struct{}{}:
+	default:
+	}
+
+	select {
+	case <-t.releaseCh:
+	case <-ctx.Done():
+		t.mu.Lock()
+		t.concurrent--
+		t.mu.Unlock()
+		return AppendEntriesResponse{}, ctx.Err()
+	}
+
+	t.mu.Lock()
+	t.concurrent--
+	t.mu.Unlock()
+	return AppendEntriesResponse{Term: req.Term, Success: true}, nil
+}
+
+func (t *blockingAppendTransport) InstallSnapshot(ctx context.Context, target string, req InstallSnapshotRequest) (InstallSnapshotResponse, error) {
+	return InstallSnapshotResponse{}, ErrNodeStopped
+}
+
+func (t *blockingAppendTransport) waitStarted(tst *testing.T, timeout time.Duration) {
+	tst.Helper()
+
+	select {
+	case <-t.started:
+	case <-time.After(timeout):
+		tst.Fatal("timed out waiting for append request")
+	}
+}
+
+func (t *blockingAppendTransport) release() {
+	close(t.releaseCh)
+}
+
+func (t *blockingAppendTransport) stats() (int, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.appendCount, t.maxConcurrentSeen
+}
+
+type recordingTransport struct {
+	mu       sync.Mutex
+	delegate Transport
+	batches  []int
+}
+
+func (t *recordingTransport) RequestVote(ctx context.Context, target string, req RequestVoteRequest) (RequestVoteResponse, error) {
+	return t.delegate.RequestVote(ctx, target, req)
+}
+
+func (t *recordingTransport) AppendEntries(ctx context.Context, target string, req AppendEntriesRequest) (AppendEntriesResponse, error) {
+	t.mu.Lock()
+	t.batches = append(t.batches, len(req.Entries))
+	t.mu.Unlock()
+	return t.delegate.AppendEntries(ctx, target, req)
+}
+
+func (t *recordingTransport) InstallSnapshot(ctx context.Context, target string, req InstallSnapshotRequest) (InstallSnapshotResponse, error) {
+	return t.delegate.InstallSnapshot(ctx, target, req)
+}
+
+func (t *recordingTransport) entryBatchSizes() []int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]int(nil), t.batches...)
+}
+
 var errInjectedHardState = errors.New("injected hard state failure")
 
 type failingHardStateStorage struct {

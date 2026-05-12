@@ -569,3 +569,148 @@ func TestFileApplySnapshotSameIndexConflict(t *testing.T) {
 		t.Fatalf("conflicting snapshot error = %v, want %v", err, raft.ErrStorageConflict)
 	}
 }
+
+func TestMemoryApplySnapshotSameIndexIdempotent(t *testing.T) {
+	storage := NewMemoryStorage()
+	snapshot := raft.Snapshot{
+		Index: 5,
+		Term:  3,
+		Data:  []byte("remote-snapshot"),
+	}
+	if err := storage.ApplySnapshot(snapshot); err != nil {
+		t.Fatalf("apply snapshot: %v", err)
+	}
+	if err := storage.ApplySnapshot(snapshot); err != nil {
+		t.Fatalf("reapply snapshot: %v", err)
+	}
+}
+
+func TestMemoryApplySnapshotSameIndexConflict(t *testing.T) {
+	storage := NewMemoryStorage()
+	if err := storage.ApplySnapshot(raft.Snapshot{
+		Index: 5,
+		Term:  3,
+		Data:  []byte("remote-snapshot"),
+	}); err != nil {
+		t.Fatalf("apply snapshot: %v", err)
+	}
+	if err := storage.ApplySnapshot(raft.Snapshot{
+		Index: 5,
+		Term:  4,
+		Data:  []byte("different"),
+	}); err != raft.ErrStorageConflict {
+		t.Fatalf("conflicting snapshot error = %v, want %v", err, raft.ErrStorageConflict)
+	}
+}
+
+func TestSnapshotRewritesWAL(t *testing.T) {
+	tests := []struct {
+		name     string
+		op       string
+		entries  int
+		snapshot raft.Snapshot
+		wantLast uint64
+	}{
+		{
+			name:     "save keeps suffix",
+			op:       "save",
+			entries:  256,
+			snapshot: raft.Snapshot{Index: 200, Term: 1, Data: []byte("snapshot")},
+			wantLast: 256,
+		},
+		{
+			name:     "apply replaces log",
+			op:       "apply",
+			entries:  128,
+			snapshot: raft.Snapshot{Index: 96, Term: 4, Data: []byte("remote")},
+			wantLast: 96,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "raft.wal")
+			storage, err := OpenFileStorage(path)
+			if err != nil {
+				t.Fatalf("open storage: %v", err)
+			}
+
+			appendFileEntries(t, storage, tt.entries)
+			before := walSize(t, path)
+
+			switch tt.op {
+			case "save":
+				err = storage.SaveSnapshot(tt.snapshot)
+			case "apply":
+				err = storage.ApplySnapshot(tt.snapshot)
+			default:
+				t.Fatalf("unknown snapshot op: %s", tt.op)
+			}
+			if err != nil {
+				t.Fatalf("%s snapshot: %v", tt.op, err)
+			}
+
+			if after := walSize(t, path); after >= before {
+				t.Fatalf("wal size after rewrite = %d, want < %d", after, before)
+			}
+			if err := storage.Close(); err != nil {
+				t.Fatalf("close storage: %v", err)
+			}
+
+			assertRecoveredSnapshot(t, path, tt.snapshot, tt.wantLast)
+		})
+	}
+}
+
+func appendFileEntries(t *testing.T, storage *FileStorage, count int) {
+	t.Helper()
+
+	entries := make([]raft.LogEntry, 0, count)
+	for i := 1; i <= count; i++ {
+		entries = append(entries, raft.LogEntry{
+			Index: uint64(i),
+			Term:  1,
+			Type:  raft.EntryNormal,
+			Data:  []byte("payload"),
+		})
+	}
+	if err := storage.Append(entries); err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+}
+
+func walSize(t *testing.T, path string) int64 {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	return info.Size()
+}
+
+func assertRecoveredSnapshot(t *testing.T, path string, want raft.Snapshot, wantLast uint64) {
+	t.Helper()
+
+	recovered, err := OpenFileStorage(path)
+	if err != nil {
+		t.Fatalf("reopen storage: %v", err)
+	}
+	defer recovered.Close()
+
+	snapshot, err := recovered.LoadSnapshot()
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if snapshot.Index != want.Index || snapshot.Term != want.Term || string(snapshot.Data) != string(want.Data) {
+		t.Fatalf("snapshot = %+v, want %+v", snapshot, want)
+	}
+
+	lastIndex, err := recovered.LastIndex()
+	if err != nil {
+		t.Fatalf("last index: %v", err)
+	}
+	if lastIndex != wantLast {
+		t.Fatalf("last index = %d, want %d", lastIndex, wantLast)
+	}
+}

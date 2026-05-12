@@ -157,8 +157,8 @@ func (r *raftNode) Election() {
 // 节点成为领导者
 func (r *raftNode) beLeader(term uint64) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.stopped || r.state != Candidate || r.currentTerm != term {
+		r.mu.Unlock()
 		return
 	}
 
@@ -170,6 +170,7 @@ func (r *raftNode) beLeader(term uint64) {
 	if err != nil {
 		r.state = Follower
 		r.leaderID = ""
+		r.mu.Unlock()
 		return
 	}
 
@@ -181,7 +182,8 @@ func (r *raftNode) beLeader(term uint64) {
 	r.nextIndex[r.id] = noop.Index + 1
 
 	r.advanceCommitIndex()
-	go r.replicateAll()
+	r.mu.Unlock()
+	r.replicateAll()
 }
 
 // 节点收到比当前大的 Term，直接降级

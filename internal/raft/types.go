@@ -92,9 +92,11 @@ type AppendEntriesRequest struct {
 }
 
 type AppendEntriesResponse struct {
-	Term        uint64
-	Success     bool
-	ReadContext uint64
+	Term          uint64
+	Success       bool
+	ReadContext   uint64
+	ConflictIndex uint64
+	ConflictTerm  uint64
 }
 
 type InstallSnapshotRequest struct {

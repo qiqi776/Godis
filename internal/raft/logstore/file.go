@@ -23,6 +23,7 @@ const (
 	fileStorageRecordSaveSnapshot   = "save_snapshot"
 	fileStorageRecordApplySnapshot  = "apply_snapshot"
 	fileStorageRecordHeaderSize     = 16
+	fileStorageRewriteTempSuffix    = ".rewrite"
 )
 
 var (
@@ -237,16 +238,13 @@ func (s *FileStorage) SaveSnapshot(snapshot raft.Snapshot) error {
 	}
 
 	nextSnapshot := cloneSnapshot(snapshot)
-	if err := s.writeRecordLocked(fileStorageRecord{
-		Type:     fileStorageRecordSaveSnapshot,
-		Snapshot: &nextSnapshot,
+	if err := s.rewriteStateLocked(s.hardState, nextOffset, nextEntries, nextSnapshot, func() {
+		s.snapshot = nextSnapshot
+		s.offset = nextOffset
+		s.entries = nextEntries
 	}); err != nil {
 		return err
 	}
-
-	s.snapshot = nextSnapshot
-	s.offset = nextOffset
-	s.entries = nextEntries
 	return nil
 }
 
@@ -275,17 +273,15 @@ func (s *FileStorage) ApplySnapshot(snapshot raft.Snapshot) error {
 	}
 
 	nextSnapshot := cloneSnapshot(snapshot)
-	if err := s.writeRecordLocked(fileStorageRecord{
-		Type:     fileStorageRecordApplySnapshot,
-		Snapshot: &nextSnapshot,
+	nextEntries := []raft.LogEntry{
+		{Index: snapshot.Index, Term: snapshot.Term, Type: raft.EntryNormal},
+	}
+	if err := s.rewriteStateLocked(s.hardState, snapshot.Index, nextEntries, nextSnapshot, func() {
+		s.snapshot = nextSnapshot
+		s.offset = snapshot.Index
+		s.entries = nextEntries
 	}); err != nil {
 		return err
-	}
-
-	s.snapshot = nextSnapshot
-	s.offset = snapshot.Index
-	s.entries = []raft.LogEntry{
-		{Index: snapshot.Index, Term: snapshot.Term, Type: raft.EntryNormal},
 	}
 	return nil
 }
@@ -445,7 +441,77 @@ func (s *FileStorage) applyRecordLocked(record fileStorageRecord) error {
 }
 
 func (s *FileStorage) writeRecordLocked(record fileStorageRecord) error {
+	return writeRecord(s.file, record)
+}
+
+func (s *FileStorage) rewriteStateLocked(hardState raft.HardState, offset uint64, entries []raft.LogEntry, snapshot raft.Snapshot, apply func()) error {
 	if s.file == nil {
+		return raft.ErrNodeStopped
+	}
+
+	lastIndex := offset + uint64(len(entries)) - 1
+	if hardState.Commit > lastIndex {
+		return raft.ErrEntryNotFound
+	}
+
+	tmpPath := s.path + fileStorageRewriteTempSuffix
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if snapshot.Index > 0 {
+		nextSnapshot := cloneSnapshot(snapshot)
+		if err := writeRecord(tmpFile, fileStorageRecord{
+			Type:     fileStorageRecordApplySnapshot,
+			Snapshot: &nextSnapshot,
+		}); err != nil {
+			return err
+		}
+	}
+
+	if tail := compactedTailEntries(entries); len(tail) > 0 {
+		if err := writeRecord(tmpFile, fileStorageRecord{
+			Type:    fileStorageRecordAppend,
+			Entries: tail,
+		}); err != nil {
+			return err
+		}
+	}
+
+	nextHardState := hardState
+	if err := writeRecord(tmpFile, fileStorageRecord{
+		Type:      fileStorageRecordHardState,
+		HardState: &nextHardState,
+	}); err != nil {
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		return err
+	}
+	oldFile := s.file
+	s.file = tmpFile
+	cleanupTemp = false
+	apply()
+	if oldFile != nil {
+		_ = oldFile.Close()
+	}
+	return syncDir(filepath.Dir(s.path))
+}
+
+func writeRecord(file *os.File, record fileStorageRecord) error {
+	if file == nil {
 		return raft.ErrNodeStopped
 	}
 
@@ -457,7 +523,7 @@ func (s *FileStorage) writeRecordLocked(record fileStorageRecord) error {
 		return fmt.Errorf("raft wal record too large: %d", len(data))
 	}
 
-	recordOffset, err := s.file.Seek(0, io.SeekEnd)
+	recordOffset, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
@@ -467,14 +533,14 @@ func (s *FileStorage) writeRecordLocked(record fileStorageRecord) error {
 	binary.LittleEndian.PutUint32(header[4:8], crc32.Checksum(data, fileStorageCRCTable))
 	binary.LittleEndian.PutUint64(header[8:], uint64(recordOffset))
 
-	if _, err := s.file.Write(header); err != nil {
+	if _, err := file.Write(header); err != nil {
 		return err
 	}
-	if _, err := s.file.Write(data); err != nil {
+	if _, err := file.Write(data); err != nil {
 		return err
 	}
 
-	return s.file.Sync()
+	return file.Sync()
 }
 
 func (s *FileStorage) truncateReplayTailLocked(offset int64) error {
@@ -577,6 +643,13 @@ func cloneEntries(entries []raft.LogEntry) []raft.LogEntry {
 	return cloned
 }
 
+func compactedTailEntries(entries []raft.LogEntry) []raft.LogEntry {
+	if len(entries) <= 1 {
+		return nil
+	}
+	return cloneEntries(entries[1:])
+}
+
 func saveSnapshotState(offset uint64, current []raft.LogEntry, snapshot raft.Snapshot) (uint64, []raft.LogEntry, error) {
 	if snapshot.Index == 0 {
 		return 0, nil, raft.ErrInvalidConfig
@@ -608,4 +681,16 @@ func cloneSnapshot(snapshot raft.Snapshot) raft.Snapshot {
 		Term:  snapshot.Term,
 		Data:  append([]byte(nil), snapshot.Data...),
 	}
+}
+
+func syncDir(dir string) error {
+	if dir == "" {
+		dir = "."
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }

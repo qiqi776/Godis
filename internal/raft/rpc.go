@@ -1,6 +1,9 @@
 package raft
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 func (r *raftNode) HandleRequestVote(ctx context.Context, req RequestVoteRequest) (RequestVoteResponse, error) {
 	r.mu.Lock()
@@ -76,11 +79,30 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 	}
 
 	prevTerm, err := r.storage.Term(req.PrevLogIndex)
-	if err != nil || prevTerm != req.PrevLogTerm {
+	if err != nil {
+		conflictIndex, conflictTerm, conflictErr := r.appendConflictHintLocked(req.PrevLogIndex)
+		if conflictErr != nil {
+			return AppendEntriesResponse{}, conflictErr
+		}
 		return AppendEntriesResponse{
-			Term:        r.currentTerm,
-			Success:     false,
-			ReadContext: req.ReadContext,
+			Term:          r.currentTerm,
+			Success:       false,
+			ReadContext:   req.ReadContext,
+			ConflictIndex: conflictIndex,
+			ConflictTerm:  conflictTerm,
+		}, nil
+	}
+	if prevTerm != req.PrevLogTerm {
+		conflictIndex, conflictErr := r.firstIndexOfTermLocked(prevTerm, req.PrevLogIndex)
+		if conflictErr != nil {
+			return AppendEntriesResponse{}, conflictErr
+		}
+		return AppendEntriesResponse{
+			Term:          r.currentTerm,
+			Success:       false,
+			ReadContext:   req.ReadContext,
+			ConflictIndex: conflictIndex,
+			ConflictTerm:  prevTerm,
 		}, nil
 	}
 
@@ -191,4 +213,60 @@ func entriesFrom(entries []LogEntry, index uint64) []LogEntry {
 		}
 	}
 	return nil
+}
+
+func (r *raftNode) appendConflictHintLocked(prevLogIndex uint64) (uint64, uint64, error) {
+	lastIndex, err := r.storage.LastIndex()
+	if err != nil {
+		return 0, 0, err
+	}
+	if prevLogIndex > lastIndex {
+		return lastIndex + 1, 0, nil
+	}
+
+	snapshot, err := r.storage.LoadSnapshot()
+	if err != nil {
+		return 0, 0, err
+	}
+	if snapshot.Index > 0 && prevLogIndex < snapshot.Index {
+		return snapshot.Index + 1, 0, nil
+	}
+
+	term, err := r.storage.Term(prevLogIndex)
+	if err == nil {
+		conflictIndex, findErr := r.firstIndexOfTermLocked(term, prevLogIndex)
+		if findErr != nil {
+			return 0, 0, findErr
+		}
+		return conflictIndex, term, nil
+	}
+	if errors.Is(err, ErrCompacted) {
+		if snapshot.Index > 0 {
+			return snapshot.Index + 1, 0, nil
+		}
+		return 1, 0, nil
+	}
+	if errors.Is(err, ErrEntryNotFound) {
+		return lastIndex + 1, 0, nil
+	}
+	return 0, 0, err
+}
+
+func (r *raftNode) firstIndexOfTermLocked(term uint64, maxIndex uint64) (uint64, error) {
+	firstIndex := maxIndex
+	for firstIndex > 0 {
+		prevIndex := firstIndex - 1
+		prevTerm, err := r.storage.Term(prevIndex)
+		if errors.Is(err, ErrCompacted) || errors.Is(err, ErrEntryNotFound) {
+			return firstIndex, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if prevTerm != term {
+			return firstIndex, nil
+		}
+		firstIndex = prevIndex
+	}
+	return firstIndex, nil
 }
