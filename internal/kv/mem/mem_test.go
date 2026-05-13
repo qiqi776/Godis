@@ -97,9 +97,9 @@ func TestDedup(t *testing.T) {
 func TestLegacy(t *testing.T) {
 	t.Parallel()
 
-	data, err := json.Marshal(snapshot{
-		Version: legacySnapshotVersion,
-		Entries: []snapshotEntry{
+	data, err := json.Marshal(kv.SnapshotData{
+		Version: kv.LegacySnapshotVersion,
+		Entries: []kv.SnapshotEntry{
 			{Key: "a", Value: []byte("1")},
 		},
 	})
