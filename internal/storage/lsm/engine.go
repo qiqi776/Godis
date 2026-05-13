@@ -1,11 +1,14 @@
 package lsm
 
 import (
-    "bytes"
-    "context"
-    "fmt"
-    "sort"
-    "sync"
+	"bytes"
+	"context"
+	"fmt"
+	"sort"
+	"sync"
+	"sync/atomic"
+
+	"mini-kv/internal/storage/lsm/record"
 )
 
 // 目前仅使用内存 map 实现
@@ -14,6 +17,7 @@ type Engine struct {
     opts   Options
     closed bool
     data   map[string][]byte
+	lastSeq atomic.Uint64
 }
 
 // 打开指定目录下的引擎
@@ -89,7 +93,11 @@ func (e *Engine) NewIterator(options IterOptions) *Iterator {
     if e.closed {
         return newErrorIterator(ErrClosed)
     }
-    return newIterator(snapshotEntries(e.data, options))
+	entries, err := e.collectEntries(makeKeyBounds(options))
+	if err != nil {
+		return newErrorIterator(err)
+	}
+    return newSliceIterator(entries, nil)
 }
 
 // 创建引擎的一份一致性快照
@@ -160,8 +168,8 @@ func snapshotEntries(data map[string][]byte, options IterOptions) []entry {
     entries := make([]entry, 0, len(keys))
     for _, key := range keys {
         entries = append(entries, entry{
-            key:   []byte(key),
-            value: cloneBytes(data[key]),
+            Key:   []byte(key),
+            Value: cloneBytes(data[key]),
         })
     }
     return entries
@@ -176,4 +184,16 @@ func inBounds(key []byte, options IterOptions) bool {
         return false
     }
     return true
+}
+
+func makeKeyBounds(options IterOptions) keyBounds {
+	return keyBounds{
+		Lower: record.CloneBytes(options.LowerBound),
+		Upper: record.CloneBytes(options.UpperBound),
+	}
+}
+
+func (e *Engine) collectEntries(bounds keyBounds) ([]entry, error) {
+    var entries []entry
+	return entries, nil
 }

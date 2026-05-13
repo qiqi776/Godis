@@ -1,6 +1,11 @@
 package lsm
 
-import "bytes"
+import (
+	"bytes"
+	"sort"
+
+	"mini-kv/internal/storage/lsm/record"
+)
 
 type Snapshot struct {
     entries []entry
@@ -18,12 +23,13 @@ func (s *Snapshot) Get(key []byte) ([]byte, bool, error) {
     if s.closed {
         return nil, false, ErrClosed
     }
-    iter := newIterator(s.entries)
-    defer func() { _ = iter.Close() }()
-    if !iter.Seek(key) || !bytes.Equal(iter.Key(), key) {
-        return nil, false, nil
-    }
-    return iter.Value(), true, nil
+    pos := sort.Search(len(s.entries), func(i int) bool {
+		return bytes.Compare(s.entries[i].Key, key) >= 0
+	})
+	if pos >= len(s.entries) || !bytes.Equal(s.entries[pos].Key, key) {
+		return nil, false, nil
+	}
+    return record.CloneBytes(s.entries[pos].Value), true, nil
 }
 
 // 范围扫描
@@ -31,13 +37,14 @@ func (s *Snapshot) NewIterator(options IterOptions) *Iterator {
     if s.closed {
         return newErrorIterator(ErrClosed)
     }
+	bounds := makeKeyBounds(options)
     entries := make([]entry, 0, len(s.entries))
     for _, item := range s.entries {
-        if inBounds(item.key, options) {
-            entries = append(entries, item)
-        }
-    }
-    return newIterator(entries)
+		if bounds.Contains(item.Key) {
+			entries = append(entries, item.Clone())
+		}
+	}
+    return newSliceIterator(entries, nil)
 }
 
 // 关闭快照

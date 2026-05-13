@@ -1,15 +1,10 @@
 package lsm
 
 import (
-    "bytes"
-    "sort"
+	"bytes"
+	"errors"
+	"sort"
 )
-
-// 内部条目
-type entry struct {
-    key   []byte
-    value []byte
-}
 
 // 迭代器
 type Iterator struct {
@@ -20,16 +15,17 @@ type Iterator struct {
 }
 
 func newErrorIterator(err error) *Iterator {
-    return &Iterator{
+	return &Iterator{
 		index: -1,
-		err: err,
+		err:   err,
 	}
 }
 
-func newIterator(entries []entry) *Iterator {
+func newSliceIterator(entries []entry, err error) *Iterator {
     return &Iterator{
         entries: cloneEntries(entries),
         index:   -1,
+		err: 	 err,	
     }
 }
 
@@ -50,7 +46,7 @@ func (it *Iterator) Seek(key []byte) bool {
         return false
     }
     pos := sort.Search(len(it.entries), func(i int) bool {
-        return bytes.Compare(it.entries[i].key, key) >= 0
+        return bytes.Compare(it.entries[i].Key, key) >= 0
     })
     if pos >= len(it.entries) {
         it.index = -1
@@ -87,7 +83,7 @@ func (it *Iterator) Key() []byte {
     if !it.Valid() {
         return nil
     }
-    return cloneBytes(it.entries[it.index].key)
+    return cloneBytes(it.entries[it.index].Key)
 }
 
 // 返回当前value
@@ -95,7 +91,7 @@ func (it *Iterator) Value() []byte {
     if !it.Valid() {
         return nil
     }
-    return cloneBytes(it.entries[it.index].value)
+    return cloneBytes(it.entries[it.index].Value)
 }
 
 func (it *Iterator) Error() error {
@@ -111,12 +107,17 @@ func (it *Iterator) Close() error {
 
 // 深拷贝辅助函数
 func cloneEntries(entries []entry) []entry {
-    out := make([]entry, len(entries))
+	if entries == nil {
+		return nil
+	}
+    cloned := make([]entry, len(entries))
     for i := range entries {
-        out[i] = entry{
-            key:   cloneBytes(entries[i].key),
-            value: cloneBytes(entries[i].value),
-        }
+        cloned[i] = entries[i].Clone()
     }
-    return out
+    return cloned
+}
+
+// 错误合并
+func errorsJoin(err error, closeErr error) error {
+	return errors.Join(err, closeErr)
 }
