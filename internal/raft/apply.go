@@ -1,5 +1,7 @@
 package raft
 
+const applyBatchSize = 64
+
 // 日志应用
 func (r *raftNode) applyLoop() {
 	for {
@@ -19,60 +21,82 @@ func (r *raftNode) applyCommitEntries() {
 			continue
 		}
 
-		r.mu.Lock()
-		if r.stopped || r.lastApplied >= r.commitIndex {
-			r.mu.Unlock()
+		entries, ok := r.nextApplyEntries()
+		if !ok {
 			return
 		}
 
-		nextIndex := r.lastApplied + 1
-		r.mu.Unlock()
+		restart := false
+		for _, entry := range entries {
+			msg, ok := r.makeApplyMsg(entry)
+			if !ok {
+				break
+			}
 
-		// 读取日志条目并处理快照压缩
-		entries, err := r.storage.Entries(nextIndex, nextIndex+1)
-		if err == ErrCompacted {
-			snapshot, snapshotErr := r.storage.LoadSnapshot()
-			if snapshotErr != nil || snapshot.Index == 0 {
+			select {
+			case r.applyCh <- msg:
+				r.mu.Lock()
+				if r.lastApplied+1 == entry.Index {
+					r.lastApplied = entry.Index
+				}
+				r.mu.Unlock()
+			case <-r.applyNotifyCh:
+				restart = true
+			case <-r.stopCh:
 				return
 			}
-			r.mu.Lock()
-			if r.lastApplied < snapshot.Index {
-				r.lastApplied = snapshot.Index
+			if restart {
+				break
 			}
-			r.mu.Unlock()
+		}
+		if restart {
 			continue
-		}
-		if err != nil || len(entries) == 0 {
-			return
-		}
-
-		entry := entries[0]
-		r.mu.RLock()
-		if r.stopped || r.restoreSnapshot.Index > 0 || entry.Index != r.lastApplied+1 || entry.Index > r.commitIndex {
-			r.mu.RUnlock()
-			continue
-		}
-		msg := ApplyMsg{
-			Index: entry.Index,
-			Term:  entry.Term,
-			Type:  entry.Type,
-			Data:  append([]byte(nil), entry.Data...),
-		}
-		r.mu.RUnlock()
-
-		select {
-		case r.applyCh <- msg:
-			r.mu.Lock()
-			if r.lastApplied+1 == entry.Index {
-				r.lastApplied = entry.Index
-			}
-			r.mu.Unlock()
-		case <-r.applyNotifyCh:
-			continue
-		case <-r.stopCh:
-			return
 		}
 	}
+}
+
+func (r *raftNode) nextApplyEntries() ([]LogEntry, bool) {
+	r.mu.RLock()
+	if r.stopped || r.lastApplied >= r.commitIndex {
+		r.mu.RUnlock()
+		return nil, false
+	}
+	nextIndex := r.lastApplied + 1
+	endIndex := min(r.commitIndex+1, nextIndex+applyBatchSize)
+	r.mu.RUnlock()
+
+	entries, err := r.storage.Entries(nextIndex, endIndex)
+	if err == ErrCompacted {
+		snapshot, snapshotErr := r.storage.LoadSnapshot()
+		if snapshotErr != nil || snapshot.Index == 0 {
+			return nil, false
+		}
+		r.mu.Lock()
+		if r.lastApplied < snapshot.Index {
+			r.lastApplied = snapshot.Index
+		}
+		r.mu.Unlock()
+		return nil, true
+	}
+	if err != nil || len(entries) == 0 {
+		return nil, false
+	}
+	return entries, true
+}
+
+func (r *raftNode) makeApplyMsg(entry LogEntry) (ApplyMsg, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.stopped || r.restoreSnapshot.Index > 0 || entry.Index != r.lastApplied+1 || entry.Index > r.commitIndex {
+		return ApplyMsg{}, false
+	}
+	return ApplyMsg{
+		Index: entry.Index,
+		Term:  entry.Term,
+		Type:  entry.Type,
+		Data:  append([]byte(nil), entry.Data...),
+	}, true
 }
 
 // 通过 apply loop 串行推送待恢复快照，保证 applyCh 只有一个生产者。
@@ -82,27 +106,25 @@ func (r *raftNode) applyRestoreSnapshot() bool {
 		r.mu.RUnlock()
 		return false
 	}
-	snapshot := Snapshot{
-		Index: r.restoreSnapshot.Index,
-		Term:  r.restoreSnapshot.Term,
-		Data:  append([]byte(nil), r.restoreSnapshot.Data...),
-	}
+	snapshotIndex := r.restoreSnapshot.Index
+	snapshotTerm := r.restoreSnapshot.Term
+	snapshotData := append([]byte(nil), r.restoreSnapshot.Data...)
 	r.mu.RUnlock()
 
 	msg := ApplyMsg{
-		Index:        snapshot.Index,
-		Term:         snapshot.Term,
+		Index:        snapshotIndex,
+		Term:         snapshotTerm,
 		Snapshot:     true,
-		SnapshotData: append([]byte(nil), snapshot.Data...),
+		SnapshotData: snapshotData,
 	}
 	select {
 	case r.applyCh <- msg:
 		r.mu.Lock()
-		if r.restoreSnapshot.Index == snapshot.Index && r.restoreSnapshot.Term == snapshot.Term {
+		if r.restoreSnapshot.Index == snapshotIndex && r.restoreSnapshot.Term == snapshotTerm {
 			r.restoreSnapshot = Snapshot{}
 		}
-		if r.lastApplied < snapshot.Index {
-			r.lastApplied = snapshot.Index
+		if r.lastApplied < snapshotIndex {
+			r.lastApplied = snapshotIndex
 		}
 		r.mu.Unlock()
 		return true

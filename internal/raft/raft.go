@@ -27,6 +27,7 @@ type raftNode struct {
 	quorum   int
 	state    StateType
 	leaderID string
+	started  bool
 	stopped  bool
 	fatalErr error
 
@@ -34,10 +35,12 @@ type raftNode struct {
 	votedFor    string
 
 	commitIndex uint64
+	commitTerm  uint64
 	lastApplied uint64
 
-	nextIndex  map[string]uint64
-	matchIndex map[string]uint64
+	nextIndex    map[string]uint64
+	matchIndex   map[string]uint64
+	matchScratch []uint64
 
 	storage   Storage
 	transport Transport
@@ -51,6 +54,9 @@ type raftNode struct {
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 	restoreSnapshot  Snapshot
+
+	readConfirmMu sync.Mutex
+	readConfirm   *readConfirmCall
 }
 
 func NewNode(config Config) (Node, error) {
@@ -76,6 +82,17 @@ func NewNode(config Config) (Node, error) {
 	if snapshot.Index > commitIndex {
 		commitIndex = snapshot.Index
 	}
+	commitTerm := uint64(0)
+	if commitIndex > 0 {
+		if commitIndex == snapshot.Index {
+			commitTerm = snapshot.Term
+		} else {
+			commitTerm, err = config.Storage.Term(commitIndex)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	node := &raftNode{
 		id:               config.ID,
@@ -85,9 +102,11 @@ func NewNode(config Config) (Node, error) {
 		currentTerm:      hardState.CurrentTerm,
 		votedFor:         hardState.VotedFor,
 		commitIndex:      commitIndex,
+		commitTerm:       commitTerm,
 		lastApplied:      snapshot.Index,
 		nextIndex:        make(map[string]uint64),
 		matchIndex:       make(map[string]uint64),
+		matchScratch:     make([]uint64, 0, len(config.Peers)),
 		storage:          config.Storage,
 		transport:        config.Transport,
 		applyCh:          make(chan ApplyMsg, config.ApplyBufferSize),
@@ -119,9 +138,14 @@ func (r *raftNode) Start() error {
 		r.mu.Unlock()
 		return err
 	}
+	if r.started {
+		r.mu.Unlock()
+		return nil
+	}
+	r.started = true
+	r.wg.Add(3 + len(r.replicateNotify))
 	r.mu.Unlock()
 
-	r.wg.Add(3 + len(r.replicateNotify))
 	go func() { defer r.wg.Done(); r.electionLoop() }()
 	go func() { defer r.wg.Done(); r.heartbeatLoop() }()
 	go func() { defer r.wg.Done(); r.applyLoop() }()
@@ -230,15 +254,15 @@ func (r *raftNode) Snapshot(index uint64, data []byte) error {
 
 // 返回当前节点是否是 Leader
 func (r *raftNode) IsLeader() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return !r.stopped && r.state == Leader
 }
 
 // 返回当前节点的 LeaderID
 func (r *raftNode) LeaderID() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.leaderID
 }
 

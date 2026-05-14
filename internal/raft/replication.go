@@ -14,16 +14,10 @@ func (r *raftNode) replicateAll() {
 		r.mu.RUnlock()
 		return
 	}
-
-	peers := append([]string(nil), r.peers...)
-	r.mu.RUnlock()
-
-	for _, peer := range peers {
-		if peer == r.id {
-			continue
-		}
-		r.notifyReplication(peer)
+	for _, notifyCh := range r.replicateNotify {
+		notify(notifyCh)
 	}
+	r.mu.RUnlock()
 }
 
 func (r *raftNode) notifyReplication(peer string) {
@@ -31,6 +25,10 @@ func (r *raftNode) notifyReplication(peer string) {
 	if notifyCh == nil {
 		return
 	}
+	notify(notifyCh)
+}
+
+func notify(notifyCh chan<- struct{}) {
 	select {
 	case notifyCh <- struct{}{}:
 	default:
@@ -281,10 +279,12 @@ func (r *raftNode) peerNeedsReplication(peer string) bool {
 
 // 检查是否有新日志可以在当前 Term 提交，更新 commitIndex 并将已提交日志应用到状态机
 func (r *raftNode) advanceCommitIndex() {
-	indexes := make([]uint64, 0, len(r.peers))
+	indexes := r.matchScratch[:0]
 	for _, peer := range r.peers {
 		indexes = append(indexes, r.matchIndex[peer])
 	}
+	r.matchScratch = indexes
+
 	sort.Slice(indexes, func(i, j int) bool {
 		return indexes[i] < indexes[j]
 	})
@@ -303,8 +303,6 @@ func (r *raftNode) advanceCommitIndex() {
 		return
 	}
 
-	if err := r.updateCommitIndexLocked(majorityIndex); err != nil {
-		return
-	}
+	r.updateCommitIndexLocked(majorityIndex, term)
 	r.notifyApply()
 }

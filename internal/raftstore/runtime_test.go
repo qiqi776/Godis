@@ -3,6 +3,7 @@ package raftstore
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -14,6 +15,56 @@ import (
 	"mini-kv/internal/raft"
 	"mini-kv/internal/raft/logstore"
 )
+
+func TestCommandCodecRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	command := kv.Command{
+		Type:      kv.CommandPut,
+		Key:       "key",
+		Value:     []byte("value"),
+		ClientID:  "client",
+		RequestID: 7,
+	}
+	data, err := EncodeCommand(command)
+	if err != nil {
+		t.Fatalf("encode command: %v", err)
+	}
+
+	decoded, err := DecodeCommand(data)
+	if err != nil {
+		t.Fatalf("decode command: %v", err)
+	}
+	if decoded.Type != command.Type || decoded.Key != command.Key || decoded.ClientID != command.ClientID || decoded.RequestID != command.RequestID || !bytes.Equal(decoded.Value, command.Value) {
+		t.Fatalf("decoded command = %+v, want %+v", decoded, command)
+	}
+}
+
+func TestDecodeCommandLegacyJSON(t *testing.T) {
+	t.Parallel()
+
+	command := kv.Command{
+		Type:      kv.CommandDelete,
+		Key:       "legacy-key",
+		ClientID:  "legacy-client",
+		RequestID: 11,
+	}
+	data, err := json.Marshal(commandEnvelope{
+		Version: commandVersion,
+		Command: command,
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy command: %v", err)
+	}
+
+	decoded, err := DecodeCommand(data)
+	if err != nil {
+		t.Fatalf("decode legacy command: %v", err)
+	}
+	if decoded.Type != command.Type || decoded.Key != command.Key || decoded.ClientID != command.ClientID || decoded.RequestID != command.RequestID || !bytes.Equal(decoded.Value, command.Value) {
+		t.Fatalf("decoded legacy command = %+v, want %+v", decoded, command)
+	}
+}
 
 type testNode struct {
 	id      string
@@ -286,16 +337,51 @@ func TestApplySnap(t *testing.T) {
 	}
 }
 
-func TestDropUnwaited(t *testing.T) {
+func TestWaiterReturnsCompletedResult(t *testing.T) {
 	w := newWaiter()
 	w.notify(applyResult{Index: 7, Data: []byte("late")})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	_, err := w.wait(ctx, 7)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("wait error = %v, want %v", err, context.DeadlineExceeded)
+	result, err := w.wait(ctx, 7)
+	if err != nil {
+		t.Fatalf("wait completed result: %v", err)
+	}
+	if !bytes.Equal(result.Data, []byte("late")) {
+		t.Fatalf("completed data = %q, want late", result.Data)
+	}
+}
+
+func TestProposeDoesNotHoldWaiterLock(t *testing.T) {
+	store := mem.NewMemoryStore()
+	node := &stubNode{leader: true, leaderID: "node1"}
+	rt := New(store, node)
+
+	node.propose = func(ctx context.Context, data []byte) (uint64, error) {
+		if !rt.waiter.mu.TryLock() {
+			t.Fatal("waiter mutex is held during node propose")
+		}
+		rt.waiter.mu.Unlock()
+		go rt.applyMessage(raft.ApplyMsg{
+			Index: 1,
+			Term:  1,
+			Type:  raft.EntryNormal,
+			Data:  data,
+		})
+		return 1, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := rt.Propose(ctx, kv.Command{
+		Type:  kv.CommandPut,
+		Key:   "lock",
+		Value: []byte("value"),
+	})
+	if err != nil {
+		t.Fatalf("propose error: %v", err)
 	}
 }
 

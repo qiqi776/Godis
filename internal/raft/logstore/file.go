@@ -122,19 +122,31 @@ func (s *FileStorage) Append(entries []raft.LogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	nextEntries, err := appendEntriesState(s.offset, s.entries, entries)
-	if err != nil {
-		return err
+	firstIndex := entries[0].Index
+	if firstIndex < s.offset {
+		return raft.ErrCompacted
 	}
 
+	nextIndex := s.offset + uint64(len(s.entries))
+	if firstIndex > nextIndex {
+		return raft.ErrStorageConflict
+	}
+
+	nextEntries := cloneEntries(entries)
 	if err := s.writeRecordLocked(fileStorageRecord{
 		Type:    fileStorageRecordAppend,
-		Entries: cloneEntries(entries),
+		Entries: nextEntries,
 	}); err != nil {
 		return err
 	}
 
-	s.entries = nextEntries
+	if firstIndex == nextIndex {
+		s.entries = append(s.entries, nextEntries...)
+		return nil
+	}
+
+	cut := int(firstIndex - s.offset)
+	s.entries = append(s.entries[:cut], nextEntries...)
 	return nil
 }
 
@@ -185,11 +197,12 @@ func (s *FileStorage) TruncateSuffix(index uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	nextEntries, changed, err := truncateSuffixState(s.offset, s.entries, index)
-	if err != nil {
-		return err
+	if index < s.offset {
+		return raft.ErrCompacted
 	}
-	if !changed {
+
+	last := s.offset + uint64(len(s.entries)) - 1
+	if index >= last {
 		return nil
 	}
 
@@ -200,7 +213,8 @@ func (s *FileStorage) TruncateSuffix(index uint64) error {
 		return err
 	}
 
-	s.entries = nextEntries
+	cut := int(index - s.offset + 1)
+	s.entries = s.entries[:cut]
 	return nil
 }
 
@@ -208,12 +222,13 @@ func (s *FileStorage) TruncatePrefix(index uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	nextOffset, nextEntries, changed, err := truncatePrefixState(s.offset, s.entries, index)
-	if err != nil {
-		return err
-	}
-	if !changed {
+	if index <= s.offset {
 		return nil
+	}
+
+	last := s.offset + uint64(len(s.entries)) - 1
+	if index > last {
+		return raft.ErrEntryNotFound
 	}
 
 	if err := s.writeRecordLocked(fileStorageRecord{
@@ -223,7 +238,11 @@ func (s *FileStorage) TruncatePrefix(index uint64) error {
 		return err
 	}
 
-	s.offset = nextOffset
+	cut := int(index - s.offset)
+	term := s.entries[cut].Term
+	nextEntries := []raft.LogEntry{{Index: index, Term: term, Type: raft.EntryNormal}}
+	nextEntries = append(nextEntries, cloneEntries(s.entries[cut+1:])...)
+	s.offset = index
 	s.entries = nextEntries
 	return nil
 }
@@ -528,12 +547,12 @@ func writeRecord(file *os.File, record fileStorageRecord) error {
 		return err
 	}
 
-	header := make([]byte, fileStorageRecordHeaderSize)
+	var header [fileStorageRecordHeaderSize]byte
 	binary.LittleEndian.PutUint32(header[:4], uint32(len(data)))
 	binary.LittleEndian.PutUint32(header[4:8], crc32.Checksum(data, fileStorageCRCTable))
 	binary.LittleEndian.PutUint64(header[8:], uint64(recordOffset))
 
-	if _, err := file.Write(header); err != nil {
+	if _, err := file.Write(header[:]); err != nil {
 		return err
 	}
 	if _, err := file.Write(data); err != nil {

@@ -3,6 +3,7 @@ package raftstore
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +15,12 @@ import (
 	"mini-kv/internal/raft"
 )
 
-const commandVersion = 1
+const (
+	commandVersion       = 1
+	commandBinaryVersion = 1
+)
+
+var commandBinaryMagic = [...]byte{'M', 'K', 'V', 'C'}
 
 var ErrProposalMismatch = errors.New("raftkv: proposed log entry was overwritten")
 
@@ -35,13 +41,21 @@ type commandEnvelope struct {
 }
 
 func EncodeCommand(command kv.Command) ([]byte, error) {
-	return json.Marshal(commandEnvelope{
-		Version: commandVersion,
-		Command: command,
-	})
+	out := make([]byte, 0, encodedCommandSize(command))
+	out = append(out, commandBinaryMagic[:]...)
+	out = append(out, commandBinaryVersion, byte(command.Type))
+	out = appendString(out, command.Key)
+	out = appendBytes(out, command.Value)
+	out = appendString(out, command.ClientID)
+	out = binary.AppendUvarint(out, command.RequestID)
+	return out, nil
 }
 
 func DecodeCommand(data []byte) (kv.Command, error) {
+	if isBinaryCommand(data) {
+		return decodeBinaryCommand(data)
+	}
+
 	var envelope commandEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return kv.Command{}, err
@@ -50,6 +64,106 @@ func DecodeCommand(data []byte) (kv.Command, error) {
 		return kv.Command{}, fmt.Errorf("unsupported command version: %d", envelope.Version)
 	}
 	return envelope.Command, nil
+}
+
+func encodedCommandSize(command kv.Command) int {
+	return len(commandBinaryMagic) +
+		2 +
+		uvarintSize(uint64(len(command.Key))) + len(command.Key) +
+		uvarintSize(uint64(len(command.Value))) + len(command.Value) +
+		uvarintSize(uint64(len(command.ClientID))) + len(command.ClientID) +
+		uvarintSize(command.RequestID)
+}
+
+func appendString(out []byte, value string) []byte {
+	out = binary.AppendUvarint(out, uint64(len(value)))
+	return append(out, value...)
+}
+
+func appendBytes(out []byte, value []byte) []byte {
+	out = binary.AppendUvarint(out, uint64(len(value)))
+	return append(out, value...)
+}
+
+func uvarintSize(value uint64) int {
+	size := 1
+	for value >= 0x80 {
+		value >>= 7
+		size++
+	}
+	return size
+}
+
+func isBinaryCommand(data []byte) bool {
+	return len(data) >= len(commandBinaryMagic) && bytes.Equal(data[:len(commandBinaryMagic)], commandBinaryMagic[:])
+}
+
+func decodeBinaryCommand(data []byte) (kv.Command, error) {
+	if len(data) < len(commandBinaryMagic)+2 {
+		return kv.Command{}, errors.New("command payload too short")
+	}
+	if data[len(commandBinaryMagic)] != commandBinaryVersion {
+		return kv.Command{}, fmt.Errorf("unsupported command binary version: %d", data[len(commandBinaryMagic)])
+	}
+
+	rest := data[len(commandBinaryMagic)+2:]
+	key, rest, err := readString(rest, "key")
+	if err != nil {
+		return kv.Command{}, err
+	}
+	value, rest, err := readBytes(rest, "value")
+	if err != nil {
+		return kv.Command{}, err
+	}
+	clientID, rest, err := readString(rest, "client id")
+	if err != nil {
+		return kv.Command{}, err
+	}
+	requestID, rest, err := readUvarint(rest, "request id")
+	if err != nil {
+		return kv.Command{}, err
+	}
+	if len(rest) != 0 {
+		return kv.Command{}, errors.New("command payload has trailing data")
+	}
+
+	return kv.Command{
+		Type:      kv.CommandType(data[len(commandBinaryMagic)+1]),
+		Key:       key,
+		Value:     value,
+		ClientID:  clientID,
+		RequestID: requestID,
+	}, nil
+}
+
+func readString(data []byte, field string) (string, []byte, error) {
+	value, rest, err := readBytes(data, field)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(value), rest, nil
+}
+
+func readBytes(data []byte, field string) ([]byte, []byte, error) {
+	size, rest, err := readUvarint(data, field+" length")
+	if err != nil {
+		return nil, nil, err
+	}
+	if uint64(len(rest)) < size {
+		return nil, nil, fmt.Errorf("command %s length exceeds payload", field)
+	}
+	return rest[:size], rest[size:], nil
+}
+
+func readUvarint(data []byte, field string) (uint64, []byte, error) {
+	value, n := binary.Uvarint(data)
+	if n == 0 {
+		return 0, nil, fmt.Errorf("command %s is missing", field)
+	}
+	if n < 0 {
+		return 0, nil, fmt.Errorf("command %s overflows uint64", field)
+	}
+	return value, data[n:], nil
 }
 
 type applyResult struct {
@@ -61,33 +175,28 @@ type applyResult struct {
 }
 
 type waiter struct {
-	mu      sync.Mutex
-	waiters map[uint64][]chan applyResult
+	mu             sync.Mutex
+	waiters        map[uint64][]chan applyResult
+	completed      map[uint64]applyResult
+	completedOrder []uint64
 }
+
+const completedApplyResultsLimit = 1024
 
 func newWaiter() *waiter {
 	return &waiter{
-		waiters: make(map[uint64][]chan applyResult),
+		waiters:   make(map[uint64][]chan applyResult),
+		completed: make(map[uint64]applyResult),
 	}
 }
 
 func (w *waiter) wait(ctx context.Context, index uint64) (applyResult, error) {
 	ch := make(chan applyResult, 1)
 	w.mu.Lock()
-	w.waiters[index] = append(w.waiters[index], ch)
-	w.mu.Unlock()
-
-	return w.waitRegistered(ctx, index, ch)
-}
-
-func (w *waiter) waitForProposal(ctx context.Context, propose func() (uint64, error)) (applyResult, error) {
-	ch := make(chan applyResult, 1)
-
-	w.mu.Lock()
-	index, err := propose()
-	if err != nil {
+	if result, ok := w.completed[index]; ok {
+		delete(w.completed, index)
 		w.mu.Unlock()
-		return applyResult{}, err
+		return result, nil
 	}
 	w.waiters[index] = append(w.waiters[index], ch)
 	w.mu.Unlock()
@@ -109,6 +218,7 @@ func (w *waiter) notify(result applyResult) {
 	w.mu.Lock()
 	waiters := w.waiters[result.Index]
 	if len(waiters) == 0 {
+		w.rememberLocked(result)
 		w.mu.Unlock()
 		return
 	}
@@ -136,6 +246,19 @@ func (w *waiter) unregister(index uint64, target chan applyResult) {
 		return
 	}
 	w.waiters[index] = waiters
+}
+
+func (w *waiter) rememberLocked(result applyResult) {
+	if _, ok := w.completed[result.Index]; !ok {
+		w.completedOrder = append(w.completedOrder, result.Index)
+	}
+	w.completed[result.Index] = result
+
+	for len(w.completedOrder) > completedApplyResultsLimit {
+		index := w.completedOrder[0]
+		w.completedOrder = w.completedOrder[1:]
+		delete(w.completed, index)
+	}
 }
 
 type Options struct {
@@ -199,16 +322,16 @@ func (s *Runtime) Propose(ctx context.Context, command kv.Command) (kv.ApplyResu
 		return kv.ApplyResult{}, err
 	}
 
-	applied, err := s.waiter.waitForProposal(ctx, func() (uint64, error) {
-		index, err := s.node.Propose(ctx, data)
-		if err != nil {
-			if errors.Is(err, raft.ErrNotLeader) {
-				return 0, NotLeaderError{LeaderID: s.node.LeaderID()}
-			}
-			return 0, err
+	index, err := s.node.Propose(ctx, data)
+	if err != nil {
+		if errors.Is(err, raft.ErrNotLeader) {
+			err = NotLeaderError{LeaderID: s.node.LeaderID()}
 		}
-		return index, nil
-	})
+		s.observe("propose", startedAt, err)
+		return kv.ApplyResult{}, err
+	}
+
+	applied, err := s.waiter.wait(ctx, index)
 	if err != nil {
 		s.observe("propose", startedAt, err)
 		return kv.ApplyResult{}, err
@@ -314,7 +437,7 @@ func (s *Runtime) applyMessage(msg raft.ApplyMsg) {
 	s.waiter.notify(applyResult{
 		Index:  msg.Index,
 		Term:   msg.Term,
-		Data:   append([]byte(nil), msg.Data...),
+		Data:   msg.Data,
 		Result: result,
 		Err:    err,
 	})

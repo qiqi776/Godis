@@ -119,9 +119,7 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 
 	if req.LeaderCommit > r.commitIndex {
 		nextCommit := min(req.LeaderCommit, lastIndex)
-		if err := r.updateCommitIndexLocked(nextCommit); err != nil {
-			return AppendEntriesResponse{}, err
-		}
+		r.updateCommitIndexLocked(nextCommit, 0)
 		r.notifyApply()
 	}
 
@@ -167,10 +165,7 @@ func (r *raftNode) HandleInstallSnapshot(ctx context.Context, req InstallSnapsho
 			r.mu.Unlock()
 			return InstallSnapshotResponse{}, err
 		}
-		if err := r.updateCommitIndexLocked(nextCommit); err != nil {
-			r.mu.Unlock()
-			return InstallSnapshotResponse{}, err
-		}
+		r.updateCommitIndexLocked(nextCommit, snapshot.Term)
 		r.lastApplied = req.LastIncludedIndex
 		r.restoreSnapshot = snapshot
 	}
