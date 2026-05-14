@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"sort"
 )
 
@@ -53,26 +54,14 @@ func (r *raftNode) replicatePeer(peer string) {
 }
 
 func (r *raftNode) replicateStep(peer string) bool {
-	snapshotReq, term, ok := r.buildInstallSnapshotRequest(peer)
-	if ok {
-		ctx, cancel := context.WithTimeout(context.Background(), r.heartbeatTimeout)
-		resp, err := r.transport.InstallSnapshot(ctx, peer, snapshotReq)
-		cancel()
-		if err != nil {
-			return false
-		}
-		if resp.Term > term {
-			_ = r.stepDown(resp.Term, "")
-			return false
-		}
-		r.handleInstallSnapshot(peer, snapshotReq)
-		return r.peerNeedsReplication(peer)
-	}
-
-	req, term, ok := r.buildAppendEntriesRequest(peer)
+	req, term, ok, needsSnapshot := r.buildAppendEntriesRequest(peer)
 	if !ok {
+		if needsSnapshot {
+			return r.replicateSnapshot(peer)
+		}
 		return false
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), r.heartbeatTimeout)
 	resp, err := r.transport.AppendEntries(ctx, peer, req)
 	cancel()
@@ -88,6 +77,26 @@ func (r *raftNode) replicateStep(peer string) bool {
 		return len(req.Entries) > 0 && r.peerNeedsReplication(peer)
 	}
 	return r.decreaseNextIndex(peer, term, resp)
+}
+
+func (r *raftNode) replicateSnapshot(peer string) bool {
+	snapshotReq, term, ok := r.buildInstallSnapshotRequest(peer)
+	if !ok {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), r.heartbeatTimeout)
+	resp, err := r.transport.InstallSnapshot(ctx, peer, snapshotReq)
+	cancel()
+	if err != nil {
+		return false
+	}
+	if resp.Term > term {
+		_ = r.stepDown(resp.Term, "")
+		return false
+	}
+	r.handleInstallSnapshot(peer, snapshotReq)
+	return r.peerNeedsReplication(peer)
 }
 
 func (r *raftNode) buildInstallSnapshotRequest(peer string) (InstallSnapshotRequest, uint64, bool) {
@@ -114,11 +123,11 @@ func (r *raftNode) buildInstallSnapshotRequest(peer string) (InstallSnapshotRequ
 	}, term, true
 }
 
-func (r *raftNode) buildAppendEntriesRequest(peer string) (AppendEntriesRequest, uint64, bool) {
+func (r *raftNode) buildAppendEntriesRequest(peer string) (AppendEntriesRequest, uint64, bool, bool) {
 	r.mu.RLock()
 	if r.stopped || r.state != Leader {
 		r.mu.RUnlock()
-		return AppendEntriesRequest{}, 0, false
+		return AppendEntriesRequest{}, 0, false, false
 	}
 
 	term := r.currentTerm
@@ -133,12 +142,12 @@ func (r *raftNode) buildAppendEntriesRequest(peer string) (AppendEntriesRequest,
 
 	prevLogTerm, err := r.storage.Term(prevLogIndex)
 	if err != nil {
-		return AppendEntriesRequest{}, 0, false
+		return AppendEntriesRequest{}, term, false, errors.Is(err, ErrCompacted)
 	}
 
 	lastIndex, err := r.storage.LastIndex()
 	if err != nil {
-		return AppendEntriesRequest{}, 0, false
+		return AppendEntriesRequest{}, term, false, false
 	}
 
 	var entries []LogEntry
@@ -146,7 +155,7 @@ func (r *raftNode) buildAppendEntriesRequest(peer string) (AppendEntriesRequest,
 		endIndex := min(lastIndex+1, nextIndex+replicationBatchSize)
 		entries, err = r.storage.Entries(nextIndex, endIndex)
 		if err != nil {
-			return AppendEntriesRequest{}, 0, false
+			return AppendEntriesRequest{}, term, false, errors.Is(err, ErrCompacted)
 		}
 	}
 	return AppendEntriesRequest{
@@ -156,7 +165,7 @@ func (r *raftNode) buildAppendEntriesRequest(peer string) (AppendEntriesRequest,
 		PrevLogTerm:  prevLogTerm,
 		Entries:      entries,
 		LeaderCommit: leaderCommit,
-	}, term, true
+	}, term, true, false
 }
 
 func (r *raftNode) handleAppendEntries(peer string, req AppendEntriesRequest) {
@@ -263,11 +272,6 @@ func (r *raftNode) peerNeedsReplication(peer string) bool {
 
 	if nextIndex == 0 {
 		nextIndex = 1
-	}
-
-	snapshot, err := r.storage.LoadSnapshot()
-	if err == nil && snapshot.Index > 0 && nextIndex <= snapshot.Index {
-		return true
 	}
 
 	lastIndex, err := r.storage.LastIndex()

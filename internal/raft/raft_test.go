@@ -389,6 +389,158 @@ func TestProposeBatchesConcurrentEntries(t *testing.T) {
 	}
 }
 
+func TestReadIndexDoesNotWaitForProposalAppendFsync(t *testing.T) {
+	storage := newBlockingAppendStorage()
+	appendTerms(t, storage.memStorage, 1)
+
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1"},
+		Storage:          storage,
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	defer node.Stop()
+
+	raftNode := becomeLeader(node, 1)
+	raftNode.commitIndex = 1
+	raftNode.commitTerm = 1
+	raftNode.lastApplied = 1
+	raftNode.matchIndex["node1"] = 1
+
+	storage.blockNextAppend()
+	proposeDone := make(chan error, 1)
+	go func() {
+		_, err := node.Propose(context.Background(), []byte("blocked"))
+		proposeDone <- err
+	}()
+	storage.waitBlocked(t, time.Second)
+
+	type readResult struct {
+		index uint64
+		err   error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		index, err := node.ReadIndex(context.Background())
+		readDone <- readResult{index: index, err: err}
+	}()
+
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		close(storage.release)
+	}
+	defer release()
+
+	select {
+	case result := <-readDone:
+		if result.err != nil {
+			t.Fatalf("read index: %v", result.err)
+		}
+		if result.index != 1 {
+			t.Fatalf("read index = %d, want 1", result.index)
+		}
+	case <-time.After(50 * time.Millisecond):
+		release()
+		t.Fatal("read index waited for proposal append storage write")
+	}
+
+	release()
+	if err := <-proposeDone; err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+}
+
+func TestReadIndexHeartbeatDoesNotWaitForFollowerAppendFsync(t *testing.T) {
+	storage := newBlockingAppendStorage()
+	appendTerms(t, storage.memStorage, 1)
+
+	node, err := NewNode(Config{
+		ID:               "node2",
+		Peers:            []string{"node1", "node2"},
+		Storage:          storage,
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	defer node.Stop()
+
+	handler := node.(RPCHandler)
+	storage.blockNextAppend()
+
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := handler.HandleAppendEntries(context.Background(), AppendEntriesRequest{
+			Term:         1,
+			LeaderID:     "node1",
+			PrevLogIndex: 1,
+			PrevLogTerm:  1,
+			Entries: []LogEntry{
+				{Index: 2, Term: 1, Type: EntryNormal, Data: []byte("blocked")},
+			},
+			LeaderCommit: 1,
+		})
+		appendDone <- err
+	}()
+	storage.waitBlocked(t, time.Second)
+
+	readDone := make(chan error, 1)
+	go func() {
+		resp, err := handler.HandleAppendEntries(context.Background(), AppendEntriesRequest{
+			Term:        1,
+			LeaderID:    "node1",
+			ReadContext: 99,
+		})
+		if err != nil {
+			readDone <- err
+			return
+		}
+		if !resp.Success || resp.ReadContext != 99 {
+			readDone <- fmt.Errorf("read heartbeat response = %+v", resp)
+			return
+		}
+		readDone <- nil
+	}()
+
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		close(storage.release)
+	}
+	defer release()
+
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+	case <-time.After(50 * time.Millisecond):
+		release()
+		t.Fatal("read heartbeat waited for follower append storage write")
+	}
+
+	release()
+	if err := <-appendDone; err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+}
+
 func TestReadIndexIsolated(t *testing.T) {
 	net := newNet()
 	nodes := newNodes(t, net, []string{"node1", "node2", "node3"})
@@ -1615,6 +1767,22 @@ type batchCountingStorage struct {
 	maxBatch int
 }
 
+type blockingAppendStorage struct {
+	*memStorage
+	mu      sync.Mutex
+	block   bool
+	blocked chan struct{}
+	release chan struct{}
+}
+
+func newBlockingAppendStorage() *blockingAppendStorage {
+	return &blockingAppendStorage{
+		memStorage: newMemStorage(),
+		blocked:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
 func (s *batchCountingStorage) Append(entries []LogEntry) error {
 	s.mu.Lock()
 	if len(entries) > s.maxBatch {
@@ -1628,6 +1796,37 @@ func (s *batchCountingStorage) maxBatchSize() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.maxBatch
+}
+
+func (s *blockingAppendStorage) blockNextAppend() {
+	s.mu.Lock()
+	s.block = true
+	s.mu.Unlock()
+}
+
+func (s *blockingAppendStorage) Append(entries []LogEntry) error {
+	s.mu.Lock()
+	block := s.block
+	if block {
+		s.block = false
+	}
+	s.mu.Unlock()
+
+	if block {
+		close(s.blocked)
+		<-s.release
+	}
+	return s.memStorage.Append(entries)
+}
+
+func (s *blockingAppendStorage) waitBlocked(t *testing.T, timeout time.Duration) {
+	t.Helper()
+
+	select {
+	case <-s.blocked:
+	case <-time.After(timeout):
+		t.Fatal("append did not block before timeout")
+	}
 }
 
 func (s *failCommitStorage) SaveHardState(state HardState) error {

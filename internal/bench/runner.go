@@ -356,13 +356,21 @@ func newOperationWeights(cfg Config) operationWeights {
 }
 
 func shouldIgnoreCancellation(ctx context.Context, err error) bool {
-	if err == nil || ctx.Err() == nil {
+	if err == nil || !isCancellationError(err) {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if ctx.Err() != nil {
 		return true
 	}
 
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
+}
+
+func isCancellationError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	code := status.Code(err)
 	return code == codes.Canceled || code == codes.DeadlineExceeded
 }

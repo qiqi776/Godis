@@ -9,7 +9,7 @@ import (
 
 const proposalBatchSize = 64
 
-var proposalBatchWindow = 200 * time.Microsecond
+var proposalBatchWindow = 2 * time.Millisecond
 
 type Node interface {
 	Start() error
@@ -49,6 +49,7 @@ type raftNode struct {
 	storage   Storage
 	transport Transport
 	applyCh   chan ApplyMsg
+	logMu     sync.Mutex
 
 	elecTimeout      time.Duration
 	heartbeatTimeout time.Duration
@@ -332,8 +333,10 @@ func (r *raftNode) appendProposalBatch(requests []*proposalRequest) {
 		return
 	}
 
+	r.logMu.Lock()
 	lastIndex, err := r.storage.LastIndex()
 	if err != nil {
+		r.logMu.Unlock()
 		r.mu.Unlock()
 		completeProposalBatch(active, 0, err)
 		return
@@ -346,14 +349,28 @@ func (r *raftNode) appendProposalBatch(requests []*proposalRequest) {
 			Data:  request.data,
 		})
 	}
+	r.mu.Unlock()
 
 	if err := r.storage.Append(entries); err != nil {
+		r.logMu.Unlock()
+		completeProposalBatch(active, 0, err)
+		return
+	}
+	r.logMu.Unlock()
+
+	lastEntry := entries[len(entries)-1]
+	r.mu.Lock()
+	if r.stopped {
+		err := r.nodeErrorLocked()
 		r.mu.Unlock()
 		completeProposalBatch(active, 0, err)
 		return
 	}
-
-	lastEntry := entries[len(entries)-1]
+	if r.state != Leader || r.currentTerm != term {
+		r.mu.Unlock()
+		completeProposalBatch(active, 0, ErrNotLeader)
+		return
+	}
 	r.matchIndex[r.id] = lastEntry.Index
 	r.nextIndex[r.id] = lastEntry.Index + 1
 	for i, request := range active {
@@ -378,6 +395,9 @@ func completeProposalBatch(requests []*proposalRequest, index uint64, err error)
 
 // 作为 Leader 节点向本地日志追加一条新条目
 func (r *raftNode) appendEntry(entryType EntryType, data []byte) (LogEntry, error) {
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+
 	lastIndex, err := r.storage.LastIndex()
 	if err != nil {
 		return LogEntry{}, err
@@ -408,6 +428,9 @@ func (r *raftNode) Snapshot(index uint64, data []byte) error {
 	if index == 0 || index > r.lastApplied {
 		return ErrEntryNotFound
 	}
+
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
 
 	cur, err := r.storage.LoadSnapshot()
 	if err != nil {
