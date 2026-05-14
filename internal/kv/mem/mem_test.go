@@ -94,6 +94,45 @@ func TestDedup(t *testing.T) {
 	}
 }
 
+func TestBeginSnapshotStableAfterApply(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore()
+	if result := store.Apply(kv.Command{Type: kv.CommandPut, Key: "a", Value: []byte("1")}); result.Error != "" {
+		t.Fatalf("put a: %s", result.Error)
+	}
+
+	handle, err := store.BeginSnapshot()
+	if err != nil {
+		t.Fatalf("begin snapshot: %v", err)
+	}
+	defer handle.Close()
+
+	if result := store.Apply(kv.Command{Type: kv.CommandPut, Key: "a", Value: []byte("2")}); result.Error != "" {
+		t.Fatalf("overwrite a: %s", result.Error)
+	}
+	if result := store.Apply(kv.Command{Type: kv.CommandPut, Key: "b", Value: []byte("3")}); result.Error != "" {
+		t.Fatalf("put b: %s", result.Error)
+	}
+
+	data, err := handle.Marshal()
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	restored := NewMemoryStore()
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+
+	value, ok, err := restored.Get("a")
+	if err != nil || !ok || !bytes.Equal(value, []byte("1")) {
+		t.Fatalf("snapshot a = %q, ok=%v err=%v; want 1, true, nil", value, ok, err)
+	}
+	if value, ok, err := restored.Get("b"); err != nil || ok {
+		t.Fatalf("snapshot b = %q, ok=%v err=%v; want missing", value, ok, err)
+	}
+}
+
 func TestLegacy(t *testing.T) {
 	t.Parallel()
 

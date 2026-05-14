@@ -276,6 +276,8 @@ type Runtime struct {
 	snapshotThreshold uint64
 	snapshotMu        sync.Mutex
 	lastSnapshotIndex uint64
+	pendingSnapshot   uint64
+	snapshotCh        chan snapshotJob
 	applyMu           sync.Mutex
 	appliedIndex      uint64
 	appliedWaiters    map[uint64][]chan struct{}
@@ -293,12 +295,16 @@ func NewWithOptions(store kv.Store, node raft.Node, options Options) *Runtime {
 		nodeID:            options.NodeID,
 		registry:          options.Registry,
 		snapshotThreshold: options.SnapshotThreshold,
+		snapshotCh:        make(chan snapshotJob, 1),
 		appliedWaiters:    make(map[uint64][]chan struct{}),
 	}
 }
 
 func (s *Runtime) Start(ctx context.Context) {
 	go s.applyLoop(ctx)
+	if s.snapshotThreshold > 0 {
+		go s.snapshotLoop(ctx)
+	}
 }
 
 func (s *Runtime) IsLeader() bool {
@@ -459,25 +465,91 @@ func (s *Runtime) maybeSnapshot(index uint64) {
 		return
 	}
 
-	s.snapshotMu.Lock()
-	defer s.snapshotMu.Unlock()
-
-	if index <= s.lastSnapshotIndex || index-s.lastSnapshotIndex < s.snapshotThreshold {
+	if !s.reserveSnapshot(index) {
 		return
 	}
 
 	startedAt := time.Now()
-	data, err := s.store.Snapshot()
+	handle, err := beginSnapshot(s.store)
 	if err != nil {
+		s.finishSnapshot(index, err)
 		s.observe("snapshot_create", startedAt, err)
 		return
 	}
-	if err := s.node.Snapshot(index, data); err != nil {
-		s.observe("snapshot_create", startedAt, err)
-		return
+
+	job := snapshotJob{
+		index:     index,
+		handle:    handle,
+		startedAt: startedAt,
 	}
-	s.lastSnapshotIndex = index
-	s.observe("snapshot_create", startedAt, nil)
+	select {
+	case s.snapshotCh <- job:
+	default:
+		_ = handle.Close()
+		err := errors.New("snapshot worker queue is full")
+		s.finishSnapshot(index, err)
+		s.observe("snapshot_create", startedAt, err)
+	}
+}
+
+func (s *Runtime) reserveSnapshot(index uint64) bool {
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+
+	if s.pendingSnapshot != 0 {
+		return false
+	}
+	if index <= s.lastSnapshotIndex || index-s.lastSnapshotIndex < s.snapshotThreshold {
+		return false
+	}
+	s.pendingSnapshot = index
+	return true
+}
+
+func (s *Runtime) snapshotLoop(ctx context.Context) {
+	for {
+		select {
+		case job := <-s.snapshotCh:
+			s.runSnapshotJob(job)
+		case <-ctx.Done():
+			s.closePendingSnapshots()
+			return
+		}
+	}
+}
+
+func (s *Runtime) closePendingSnapshots() {
+	for {
+		select {
+		case job := <-s.snapshotCh:
+			_ = job.handle.Close()
+			s.finishSnapshot(job.index, context.Canceled)
+		default:
+			return
+		}
+	}
+}
+
+func (s *Runtime) runSnapshotJob(job snapshotJob) {
+	defer job.handle.Close()
+
+	data, err := job.handle.Marshal()
+	if err == nil {
+		err = s.node.Snapshot(job.index, data)
+	}
+	s.finishSnapshot(job.index, err)
+	s.observe("snapshot_create", job.startedAt, err)
+}
+
+func (s *Runtime) finishSnapshot(index uint64, err error) {
+	s.snapshotMu.Lock()
+	if s.pendingSnapshot == index {
+		s.pendingSnapshot = 0
+	}
+	if err == nil && index > s.lastSnapshotIndex {
+		s.lastSnapshotIndex = index
+	}
+	s.snapshotMu.Unlock()
 }
 
 func (s *Runtime) linearizableRead(ctx context.Context) error {
@@ -571,4 +643,33 @@ func (s *Runtime) observe(operation string, startedAt time.Time, err error) {
 		return
 	}
 	s.registry.ObserveRaftOperation(s.nodeID, operation, time.Since(startedAt), err)
+}
+
+type snapshotJob struct {
+	index     uint64
+	handle    kv.SnapshotHandle
+	startedAt time.Time
+}
+
+type eagerSnapshotHandle struct {
+	data []byte
+}
+
+func beginSnapshot(store kv.Store) (kv.SnapshotHandle, error) {
+	if snapshotter, ok := store.(kv.Snapshotter); ok {
+		return snapshotter.BeginSnapshot()
+	}
+	data, err := store.Snapshot()
+	if err != nil {
+		return nil, err
+	}
+	return eagerSnapshotHandle{data: data}, nil
+}
+
+func (h eagerSnapshotHandle) Marshal() ([]byte, error) {
+	return h.data, nil
+}
+
+func (h eagerSnapshotHandle) Close() error {
+	return nil
 }

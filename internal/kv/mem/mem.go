@@ -9,14 +9,17 @@ import (
 )
 
 type MemoryStore struct {
-	mu       sync.RWMutex
-	data     map[string][]byte
-	sessions map[string]kv.Session
+	mu           sync.RWMutex
+	data         map[string][]byte
+	sessions     map[string]kv.Session
+	snapshotRefs uint64
+	cowShared    bool
 }
 
 var _ kv.Store = (*MemoryStore)(nil)
 var _ kv.FSM = (*MemoryStore)(nil)
 var _ kv.Reader = (*MemoryStore)(nil)
+var _ kv.Snapshotter = (*MemoryStore)(nil)
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
@@ -41,6 +44,7 @@ func (s *MemoryStore) Apply(command kv.Command) kv.ApplyResult {
 		}
 	}
 
+	s.ensureWritableLocked()
 	result := s.applyLocked(command)
 
 	if command.ClientID != "" && command.RequestID > 0 {
@@ -111,11 +115,46 @@ func (s *MemoryStore) applyDelete(command kv.Command) kv.ApplyResult {
 }
 
 func (s *MemoryStore) Snapshot() ([]byte, error) {
+	handle, err := s.BeginSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close()
+	return handle.Marshal()
+}
+
+func (s *MemoryStore) BeginSnapshot() (kv.SnapshotHandle, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	keys := make([]string, 0, len(s.data))
-	for key := range s.data {
+	s.snapshotRefs++
+	s.cowShared = true
+	return &snapshotHandle{
+		store:    s,
+		data:     s.data,
+		sessions: s.sessions,
+	}, nil
+}
+
+func (s *MemoryStore) ensureWritableLocked() {
+	if !s.cowShared {
+		return
+	}
+	s.data = cloneDataMap(s.data)
+	s.sessions = cloneSessionsMap(s.sessions)
+	s.cowShared = false
+}
+
+type snapshotHandle struct {
+	store    *MemoryStore
+	once     sync.Once
+	data     map[string][]byte
+	sessions map[string]kv.Session
+}
+
+func (h *snapshotHandle) Marshal() ([]byte, error) {
+	keys := make([]string, 0, len(h.data))
+	for key := range h.data {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -124,11 +163,25 @@ func (s *MemoryStore) Snapshot() ([]byte, error) {
 	for _, key := range keys {
 		entries = append(entries, kv.SnapshotEntry{
 			Key:   key,
-			Value: kv.CloneBytes(s.data[key]),
+			Value: kv.CloneBytes(h.data[key]),
 		})
 	}
 
-	return kv.MarshalSnapshot(entries, s.sessions)
+	return kv.MarshalSnapshot(entries, h.sessions)
+}
+
+func (h *snapshotHandle) Close() error {
+	h.once.Do(func() {
+		h.store.mu.Lock()
+		if h.store.snapshotRefs > 0 {
+			h.store.snapshotRefs--
+		}
+		if h.store.snapshotRefs == 0 {
+			h.store.cowShared = false
+		}
+		h.store.mu.Unlock()
+	})
+	return nil
 }
 
 func (s *MemoryStore) Restore(data []byte) error {
@@ -145,6 +198,32 @@ func (s *MemoryStore) Restore(data []byte) error {
 	s.mu.Lock()
 	s.data = nextData
 	s.sessions = in.SessionsMap()
+	s.cowShared = false
 	s.mu.Unlock()
 	return nil
+}
+
+func cloneDataMap(in map[string][]byte) map[string][]byte {
+	out := make(map[string][]byte, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneSessionsMap(in map[string]kv.Session) map[string]kv.Session {
+	out := make(map[string]kv.Session, len(in))
+	for clientID, session := range in {
+		next := kv.Session{
+			LastRequestID: session.LastRequestID,
+		}
+		if session.Results != nil {
+			next.Results = make(map[uint64]kv.ApplyResult, len(session.Results))
+			for requestID, result := range session.Results {
+				next.Results[requestID] = kv.CloneApplyResult(result)
+			}
+		}
+		out[clientID] = next
+	}
+	return out
 }

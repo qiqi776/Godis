@@ -19,6 +19,7 @@ type readConfirmCall struct {
 }
 
 var readContextSeq atomic.Uint64
+var readConfirmBatchWindow = 100 * time.Microsecond
 
 func (r *raftNode) ReadIndex(ctx context.Context) (uint64, error) {
 	if ctx == nil {
@@ -151,7 +152,11 @@ func waitReadConfirm(ctx context.Context, call *readConfirmCall) error {
 }
 
 func (r *raftNode) runReadConfirm(call *readConfirmCall, term uint64, peers []string, quorum int, timeout time.Duration) {
-	call.err = r.confirmQuorum(term, peers, quorum, timeout)
+	if err := r.waitReadConfirmBatchWindow(); err != nil {
+		call.err = err
+	} else {
+		call.err = r.confirmQuorum(term, peers, quorum, timeout)
+	}
 	close(call.done)
 
 	r.readConfirmMu.Lock()
@@ -159,6 +164,24 @@ func (r *raftNode) runReadConfirm(call *readConfirmCall, term uint64, peers []st
 		r.readConfirm = nil
 	}
 	r.readConfirmMu.Unlock()
+}
+
+func (r *raftNode) waitReadConfirmBatchWindow() error {
+	if readConfirmBatchWindow <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(readConfirmBatchWindow)
+	select {
+	case <-timer.C:
+		return nil
+	case <-r.stopCh:
+		stop(timer)
+		r.mu.RLock()
+		err := r.nodeErrorLocked()
+		r.mu.RUnlock()
+		return err
+	}
 }
 
 func (r *raftNode) confirmQuorum(term uint64, peers []string, quorum int, timeout time.Duration) error {

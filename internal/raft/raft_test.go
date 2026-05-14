@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -332,6 +333,62 @@ func TestRejectPropose(t *testing.T) {
 	t.Fatalf("no follower found")
 }
 
+func TestProposeBatchesConcurrentEntries(t *testing.T) {
+	previousWindow := proposalBatchWindow
+	proposalBatchWindow = 10 * time.Millisecond
+	t.Cleanup(func() {
+		proposalBatchWindow = previousWindow
+	})
+
+	storage := &batchCountingStorage{memStorage: newMemStorage()}
+	node := newTestNode(t, "node1", storage, NewFakeTransport())
+	defer node.Stop()
+	_ = becomeLeader(node, 1)
+
+	const proposals = 16
+	start := make(chan struct{})
+	errCh := make(chan error, proposals)
+
+	var wg sync.WaitGroup
+	wg.Add(proposals)
+	for i := 0; i < proposals; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start
+			index, err := node.Propose(context.Background(), []byte(fmt.Sprintf("cmd-%d", i)))
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if index == 0 {
+				errCh <- fmt.Errorf("proposal index is zero")
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("propose: %v", err)
+		}
+	}
+
+	if maxBatch := storage.maxBatchSize(); maxBatch < 2 {
+		t.Fatalf("max append batch size = %d, want at least 2", maxBatch)
+	}
+
+	entries, err := storage.Entries(1, proposals+1)
+	if err != nil {
+		t.Fatalf("entries: %v", err)
+	}
+	if len(entries) != proposals {
+		t.Fatalf("entry count = %d, want %d", len(entries), proposals)
+	}
+}
+
 func TestReadIndexIsolated(t *testing.T) {
 	net := newNet()
 	nodes := newNodes(t, net, []string{"node1", "node2", "node3"})
@@ -479,6 +536,51 @@ func TestReadIndexCoalescesConcurrentConfirms(t *testing.T) {
 
 	time.Sleep(20 * time.Millisecond)
 	transport.release()
+
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("read index error: %v", err)
+		}
+	}
+
+	if calls := transport.callCount(); calls != 1 {
+		t.Fatalf("read confirm append calls = %d, want 1", calls)
+	}
+}
+
+func TestReadIndexBatchWindowCoalescesBeforeConfirm(t *testing.T) {
+	previousWindow := readConfirmBatchWindow
+	readConfirmBatchWindow = 20 * time.Millisecond
+	defer func() {
+		readConfirmBatchWindow = previousWindow
+	}()
+
+	storage := newMemStorage()
+	appendTerms(t, storage, 1)
+
+	transport := &countingReadTransport{}
+	node := newTestNode(t, "node1", storage, transport)
+	defer node.Stop()
+
+	raftNode := becomeLeader(node, 1)
+	raftNode.commitIndex = 1
+	raftNode.commitTerm = 1
+	raftNode.lastApplied = 1
+	raftNode.matchIndex["node1"] = 1
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := node.ReadIndex(ctx)
+		errCh <- err
+	}()
+	time.Sleep(2 * time.Millisecond)
+	go func() {
+		_, err := node.ReadIndex(ctx)
+		errCh <- err
+	}()
 
 	for i := 0; i < 2; i++ {
 		if err := <-errCh; err != nil {
@@ -1465,6 +1567,36 @@ func (t *blockingReadTransport) callCount() int {
 	return t.calls
 }
 
+type countingReadTransport struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *countingReadTransport) RequestVote(ctx context.Context, target string, req RequestVoteRequest) (RequestVoteResponse, error) {
+	return RequestVoteResponse{}, ErrNodeStopped
+}
+
+func (t *countingReadTransport) AppendEntries(ctx context.Context, target string, req AppendEntriesRequest) (AppendEntriesResponse, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return AppendEntriesResponse{
+		Term:        req.Term,
+		Success:     true,
+		ReadContext: req.ReadContext,
+	}, nil
+}
+
+func (t *countingReadTransport) InstallSnapshot(ctx context.Context, target string, req InstallSnapshotRequest) (InstallSnapshotResponse, error) {
+	return InstallSnapshotResponse{}, ErrNodeStopped
+}
+
+func (t *countingReadTransport) callCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
 var errInjectedHardState = errors.New("injected hard state failure")
 
 type failingHardStateStorage struct {
@@ -1475,6 +1607,27 @@ type failingHardStateStorage struct {
 type failCommitStorage struct {
 	*memStorage
 	fail bool
+}
+
+type batchCountingStorage struct {
+	*memStorage
+	mu       sync.Mutex
+	maxBatch int
+}
+
+func (s *batchCountingStorage) Append(entries []LogEntry) error {
+	s.mu.Lock()
+	if len(entries) > s.maxBatch {
+		s.maxBatch = len(entries)
+	}
+	s.mu.Unlock()
+	return s.memStorage.Append(entries)
+}
+
+func (s *batchCountingStorage) maxBatchSize() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxBatch
 }
 
 func (s *failCommitStorage) SaveHardState(state HardState) error {

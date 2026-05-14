@@ -39,3 +39,12 @@ type Store interface {
 type Reader interface {
 	Get(key string) ([]byte, bool, error)
 }
+
+type SnapshotHandle interface {
+	Marshal() ([]byte, error)
+	Close() error
+}
+
+type Snapshotter interface {
+	BeginSnapshot() (SnapshotHandle, error)
+}

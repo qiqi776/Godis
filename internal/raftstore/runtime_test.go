@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,6 +79,7 @@ type stubNode struct {
 	leader   bool
 	leaderID string
 	propose  func(context.Context, []byte) (uint64, error)
+	snapshot func(uint64, []byte) error
 }
 
 func (n *stubNode) Start() error { return nil }
@@ -93,7 +95,12 @@ func (n *stubNode) Propose(ctx context.Context, data []byte) (uint64, error) {
 
 func (n *stubNode) ReadIndex(context.Context) (uint64, error) { return 0, nil }
 
-func (n *stubNode) Snapshot(uint64, []byte) error { return nil }
+func (n *stubNode) Snapshot(index uint64, data []byte) error {
+	if n.snapshot == nil {
+		return nil
+	}
+	return n.snapshot(index, data)
+}
 
 func (n *stubNode) IsLeader() bool { return n.leader }
 
@@ -421,6 +428,80 @@ func TestFastPropose(t *testing.T) {
 	}
 }
 
+func TestSnapshotRunsAsynchronously(t *testing.T) {
+	store := &blockingSnapshotStore{
+		MemoryStore: mem.NewMemoryStore(),
+		started:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	node := &stubNode{leader: true, leaderID: "node1"}
+
+	snapshotDone := make(chan snapshotResult, 1)
+	node.snapshot = func(index uint64, data []byte) error {
+		snapshotDone <- snapshotResult{
+			index: index,
+			data:  append([]byte(nil), data...),
+		}
+		return nil
+	}
+
+	rt := NewWithOptions(store, node, Options{SnapshotThreshold: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt.Start(ctx)
+
+	first, err := EncodeCommand(kv.Command{Type: kv.CommandPut, Key: "first", Value: []byte("one")})
+	if err != nil {
+		t.Fatalf("encode first: %v", err)
+	}
+	second, err := EncodeCommand(kv.Command{Type: kv.CommandPut, Key: "second", Value: []byte("two")})
+	if err != nil {
+		t.Fatalf("encode second: %v", err)
+	}
+
+	applyReturned := make(chan struct{})
+	go func() {
+		rt.applyMessage(raft.ApplyMsg{Index: 1, Term: 1, Type: raft.EntryNormal, Data: first})
+		close(applyReturned)
+	}()
+
+	select {
+	case <-applyReturned:
+	case <-time.After(time.Second):
+		t.Fatal("apply path blocked on snapshot marshal")
+	}
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot worker did not start")
+	}
+
+	rt.applyMessage(raft.ApplyMsg{Index: 2, Term: 1, Type: raft.EntryNormal, Data: second})
+	close(store.release)
+
+	var snapshot snapshotResult
+	select {
+	case snapshot = <-snapshotDone:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot did not finish")
+	}
+	if snapshot.index != 1 {
+		t.Fatalf("snapshot index = %d, want 1", snapshot.index)
+	}
+
+	restored := mem.NewMemoryStore()
+	if err := restored.Restore(snapshot.data); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	value, ok, err := restored.Get("first")
+	if err != nil || !ok || !bytes.Equal(value, []byte("one")) {
+		t.Fatalf("snapshot first = %q, ok=%v err=%v; want one, true, nil", value, ok, err)
+	}
+	if value, ok, err := restored.Get("second"); err != nil || ok {
+		t.Fatalf("snapshot second = %q, ok=%v err=%v; want missing", value, ok, err)
+	}
+}
+
 func newCluster(t *testing.T, ids []string) []*testNode {
 	t.Helper()
 
@@ -705,4 +786,42 @@ func assertLeaderErr(t *testing.T, err error) {
 	if !errors.As(err, &notLeader) {
 		t.Fatalf("error = %v, want NotLeaderError", err)
 	}
+}
+
+type blockingSnapshotStore struct {
+	*mem.MemoryStore
+	started chan struct{}
+	release chan struct{}
+}
+
+type snapshotResult struct {
+	index uint64
+	data  []byte
+}
+
+func (s *blockingSnapshotStore) BeginSnapshot() (kv.SnapshotHandle, error) {
+	handle, err := s.MemoryStore.BeginSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	return &blockingSnapshotHandle{
+		SnapshotHandle: handle,
+		started:        s.started,
+		release:        s.release,
+	}, nil
+}
+
+type blockingSnapshotHandle struct {
+	kv.SnapshotHandle
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (h *blockingSnapshotHandle) Marshal() ([]byte, error) {
+	h.once.Do(func() {
+		close(h.started)
+	})
+	<-h.release
+	return h.SnapshotHandle.Marshal()
 }
