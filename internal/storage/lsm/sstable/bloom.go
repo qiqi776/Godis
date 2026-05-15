@@ -10,18 +10,23 @@ const bloomVersion uint32 = 1
 
 var ErrInvalidBloom = errors.New("bloom: invalid filter")
 
+// Bloom 是不可变的布隆过滤器，用于快速判定键是否“可能存在”
 type Bloom struct {
-	bits     []uint64
-	bitCount uint64
-	hashes   uint8
+	bits     []uint64 // 位数组，每个元素存储 64 位
+	bitCount uint64   // 位数组总位数（始终是 64 的倍数）
+	hashes   uint8    // 使用的哈希函数个数
 }
 
+// BloomBuilder 用于逐步构建布隆过滤器
 type BloomBuilder struct {
 	bits     []uint64
 	bitCount uint64
 	hashes   uint8
 }
 
+// NewBloomBuilder 根据预期键数量和每个键的位数创建构建器
+// expectedKeys: 预期插入的键数量
+// bitsPerKey:   每个键平均分配的位数，默认 10，对应约 1% 的假阳性率
 func NewBloomBuilder(expectedKeys int, bitsPerKey int) *BloomBuilder {
 	if expectedKeys < 1 {
 		expectedKeys = 1
@@ -29,6 +34,7 @@ func NewBloomBuilder(expectedKeys int, bitsPerKey int) *BloomBuilder {
 	if bitsPerKey < 1 {
 		bitsPerKey = 10
 	}
+	// 计算总位数，并对齐到 64 的倍数
 	bitCount := uint64(expectedKeys * bitsPerKey)
 	if bitCount < 64 {
 		bitCount = 64
@@ -36,6 +42,7 @@ func NewBloomBuilder(expectedKeys int, bitsPerKey int) *BloomBuilder {
 	words := (bitCount + 63) / 64
 	bitCount = words * 64
 
+	// 最优哈希函数个数 k = (bitsPerKey) * ln(2)，近似 0.69
 	hashes := uint8(bitsPerKey * 69 / 100)
 	if hashes < 1 {
 		hashes = 1
@@ -51,10 +58,12 @@ func NewBloomBuilder(expectedKeys int, bitsPerKey int) *BloomBuilder {
 	}
 }
 
+// Add 向构建器中添加一个键，将其对应的 k 个位置置 1
 func (b *BloomBuilder) Add(key []byte) {
 	setBits(b.bits, b.bitCount, b.hashes, key)
 }
 
+// Finish 生成一个不可变的 Bloom 副本，此后对构建器的修改不会影响它
 func (b *BloomBuilder) Finish() *Bloom {
 	bits := make([]uint64, len(b.bits))
 	copy(bits, b.bits)
@@ -65,6 +74,8 @@ func (b *BloomBuilder) Finish() *Bloom {
 	}
 }
 
+// MayContain 检查键是否“可能存在”返回 false 表示键一定不存在
+// 返回 true 表示键可能存在（有假阳性概率）
 func (b *Bloom) MayContain(key []byte) bool {
 	if b == nil || b.bitCount == 0 || b.hashes == 0 || len(b.bits) == 0 {
 		return false
@@ -73,6 +84,7 @@ func (b *Bloom) MayContain(key []byte) bool {
 	h2 := mix64(h1)
 	for i := uint8(0); i < b.hashes; i++ {
 		bit := (h1 + uint64(i)*h2) % b.bitCount
+		// 若某一位为 0，则该键一定不存在
 		if b.bits[bit/64]&(uint64(1)<<(bit%64)) == 0 {
 			return false
 		}
@@ -80,6 +92,9 @@ func (b *Bloom) MayContain(key []byte) bool {
 	return true
 }
 
+// MarshalBinary 序列化布隆过滤器为二进制格式：
+//
+//	version(4B) | hashes(1B) | bitCount(8B) | wordCount(8B) | bits...
 func (b *Bloom) MarshalBinary() ([]byte, error) {
 	if b == nil {
 		return nil, fmt.Errorf("%w: nil bloom", ErrInvalidBloom)
@@ -95,6 +110,7 @@ func (b *Bloom) MarshalBinary() ([]byte, error) {
 	return out, nil
 }
 
+// DecodeBloom 从二进制数据中反序列化布隆过滤器，并进行严格的完整性校验
 func DecodeBloom(data []byte) (*Bloom, error) {
 	reader := bloomReader{data: data}
 	version, ok := reader.u32()
@@ -134,6 +150,7 @@ func DecodeBloom(data []byte) (*Bloom, error) {
 	}, nil
 }
 
+// setBits 利用双重哈希在布隆过滤器中置位 k 次
 func setBits(bits []uint64, bitCount uint64, hashes uint8, key []byte) {
 	h1 := hash64(key)
 	h2 := mix64(h1)
@@ -143,6 +160,7 @@ func setBits(bits []uint64, bitCount uint64, hashes uint8, key []byte) {
 	}
 }
 
+// hash64 基于 FNV-1a 变体的 64 位哈希函数
 func hash64(data []byte) uint64 {
 	const (
 		offset = 14695981039346656037
@@ -156,6 +174,7 @@ func hash64(data []byte) uint64 {
 	return hash
 }
 
+// mix64 对 64 位整数进行混淆，生成第二个哈希值，并确保非零
 func mix64(x uint64) uint64 {
 	x ^= x >> 33
 	x *= 0xff51afd7ed558ccd
@@ -163,11 +182,12 @@ func mix64(x uint64) uint64 {
 	x *= 0xc4ceb9fe1a85ec53
 	x ^= x >> 33
 	if x == 0 {
-		return 0x9e3779b97f4a7c15
+		return 0x9e3779b97f4a7c15 // 黄金比常数备用
 	}
 	return x
 }
 
+// bloomReader 是解码布隆过滤器时的简易字节流读取器
 type bloomReader struct {
 	data []byte
 	off  int
