@@ -36,6 +36,9 @@ func TestLoad(t *testing.T) {
 	if cfg.Raft.WALPath != "data/raft-node2.wal" {
 		t.Fatalf("raft wal path = %q, want data/raft-node2.wal", cfg.Raft.WALPath)
 	}
+	if cfg.Storage.LSMPath != "data/lsm-node2" {
+		t.Fatalf("storage lsm path = %q, want data/lsm-node2", cfg.Storage.LSMPath)
+	}
 	if cfg.Raft.ElectionTimeoutMS != Default().Raft.ElectionTimeoutMS {
 		t.Fatalf("election timeout = %d, want %d", cfg.Raft.ElectionTimeoutMS, Default().Raft.ElectionTimeoutMS)
 	}

@@ -8,11 +8,16 @@ import (
 )
 
 type Config struct {
-	Host     string      `yaml:"host"`
-	Port     int         `yaml:"port"`
-	LogLevel string      `yaml:"log_level"`
-	Debug    DebugConfig `yaml:"debug"`
-	Raft     RaftConfig  `yaml:"raft"`
+	Host     string        `yaml:"host"`
+	Port     int           `yaml:"port"`
+	LogLevel string        `yaml:"log_level"`
+	Debug    DebugConfig   `yaml:"debug"`
+	Storage  StorageConfig `yaml:"storage"`
+	Raft     RaftConfig    `yaml:"raft"`
+}
+
+type StorageConfig struct {
+	LSMPath string `yaml:"lsm_path"`
 }
 
 type DebugConfig struct {
@@ -42,6 +47,9 @@ func Default() Config {
 			Enabled: false,
 			Host:    "127.0.0.1",
 			Port:    6060,
+		},
+		Storage: StorageConfig{
+			LSMPath: "data/lsm-node1",
 		},
 		Raft: RaftConfig{
 			ID:                 "node1",
@@ -120,6 +128,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Raft.WALPath == "" {
 		cfg.Raft.WALPath = fmt.Sprintf("data/raft-%s.wal", cfg.Raft.ID)
+	}
+	if cfg.Storage.LSMPath == "" {
+		cfg.Storage.LSMPath = fmt.Sprintf("data/lsm-%s", cfg.Raft.ID)
 	}
 	if cfg.Raft.ElectionTimeoutMS <= 0 {
 		cfg.Raft.ElectionTimeoutMS = defaults.Raft.ElectionTimeoutMS

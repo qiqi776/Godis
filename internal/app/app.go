@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"mini-kv/internal/config"
-	"mini-kv/internal/kv/mem"
+	kvlsm "mini-kv/internal/kv/lsm"
 	"mini-kv/internal/logger"
 	"mini-kv/internal/observability"
 	"mini-kv/internal/raft"
@@ -21,7 +21,7 @@ import (
 type App struct {
 	Config        config.Config
 	Logger        *logger.Logger
-	KVStore       *mem.MemoryStore
+	KVStore       *kvlsm.Store
 	KVService     minikv.Service
 	Server        *grpcserver.Server
 	DebugServer   *observability.Server
@@ -44,15 +44,20 @@ func Start(cfgPath string) (*App, error) {
 	}
 	registry := observability.NewRegistry()
 
-	engine := mem.NewMemoryStore()
+	engine, err := kvlsm.Open(cfg.Storage.LSMPath)
+	if err != nil {
+		return nil, err
+	}
 
 	raftTransport, err := raftstoretransport.New(cfg.Raft.ID, cfg.Raft.ListenAddr, cfg.Raft.PeerAddrs)
 	if err != nil {
+		_ = engine.Close()
 		return nil, err
 	}
 
 	raftStorage, err := logstore.OpenFileStorage(cfg.Raft.WALPath)
 	if err != nil {
+		_ = engine.Close()
 		_ = raftTransport.Close()
 		return nil, err
 	}
@@ -67,6 +72,7 @@ func Start(cfgPath string) (*App, error) {
 		ApplyBufferSize:  cfg.Raft.ApplyBufferSize,
 	})
 	if err != nil {
+		_ = engine.Close()
 		_ = raftTransport.Close()
 		_ = raftStorage.Close()
 		return nil, err
@@ -74,17 +80,20 @@ func Start(cfgPath string) (*App, error) {
 
 	handler, ok := raftNode.(raft.RPCHandler)
 	if !ok {
+		_ = engine.Close()
 		_ = raftTransport.Close()
 		_ = raftStorage.Close()
 		return nil, errors.New("raft node does not implement RPCHandler")
 	}
 	if err := raftTransport.Start(handler); err != nil {
+		_ = engine.Close()
 		_ = raftTransport.Close()
 		_ = raftStorage.Close()
 		return nil, err
 	}
 
 	if err := raftNode.Start(); err != nil {
+		_ = engine.Close()
 		_ = raftTransport.Close()
 		_ = raftStorage.Close()
 		return nil, err
@@ -137,7 +146,7 @@ func (a *App) Run(ctx context.Context) error {
 			_ = a.RaftStorage.Close()
 		}
 		if a.KVStore != nil {
-			a.KVStore.Close()
+			_ = a.KVStore.Close()
 		}
 	}()
 	return a.Server.Run(ctx)

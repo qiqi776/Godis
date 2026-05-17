@@ -6,6 +6,9 @@ debug:
   host: 127.0.0.1
   port: 17081
 
+storage:
+  lsm_path: data/bench/steady/node2/lsm
+
 raft:
   id: node2
   peers: [node1, node2, node3]

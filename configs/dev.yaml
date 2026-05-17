@@ -6,6 +6,9 @@ debug:
   host: 127.0.0.1
   port: 17080
 
+storage:
+  lsm_path: data/lsm-node1
+
 raft:
   id: node1
   peers: [node1, node2, node3]
