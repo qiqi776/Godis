@@ -29,13 +29,9 @@ func (r *raftNode) electionLoop() {
 				r.Election()
 			}
 		case <-r.resetElectionCh:
-			if !timer.Stop() {
-				<-timer.C
-			}
+			stop(timer)
 		case <-r.stopCh:
-			if !timer.Stop() {
-				<-timer.C
-			}
+			stop(timer)
 			return
 		}
 	}
@@ -74,7 +70,7 @@ func (r *raftNode) Election() {
 	r.votedFor = r.id
 	r.leaderID = ""
 	term := r.currentTerm
-	peers := append([]string(nil), r.peers...)
+	peers := r.peers
 	quorum := r.quorum
 
 	// 原子持久化，写入磁盘
@@ -239,26 +235,19 @@ func (r *raftNode) persist(snapshot raftStateSnapshot) error {
 
 // 持久化
 func (r *raftNode) persistState() error {
-	return r.persistStateWithCommit(r.commitIndex)
-}
-
-func (r *raftNode) persistStateWithCommit(commit uint64) error {
 	return r.storage.SaveHardState(HardState{
 		CurrentTerm: r.currentTerm,
 		VotedFor:    r.votedFor,
-		Commit:      commit,
 	})
 }
 
-func (r *raftNode) updateCommitIndexLocked(nextCommit uint64) error {
+func (r *raftNode) updateCommitIndexLocked(nextCommit uint64, nextCommitTerm uint64) {
 	if nextCommit <= r.commitIndex {
-		return nil
+		return
 	}
-	if err := r.persistStateWithCommit(nextCommit); err != nil {
-		return r.failNodeLocked(err)
-	}
+	// Raft defines commitIndex as volatile state; the durable state is term, vote and log.
 	r.commitIndex = nextCommit
-	return nil
+	r.commitTerm = nextCommitTerm
 }
 
 // 重置选举计时器
@@ -285,8 +274,8 @@ func (r *raftNode) randomTimeout() time.Duration {
 
 // 判断节点是否是 Leader 或者是否停止
 func (r *raftNode) isLeaderorStop() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.stopped || r.state == Leader
 }
 

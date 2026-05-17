@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -332,6 +333,214 @@ func TestRejectPropose(t *testing.T) {
 	t.Fatalf("no follower found")
 }
 
+func TestProposeBatchesConcurrentEntries(t *testing.T) {
+	previousWindow := proposalBatchWindow
+	proposalBatchWindow = 10 * time.Millisecond
+	t.Cleanup(func() {
+		proposalBatchWindow = previousWindow
+	})
+
+	storage := &batchCountingStorage{memStorage: newMemStorage()}
+	node := newTestNode(t, "node1", storage, NewFakeTransport())
+	defer node.Stop()
+	_ = becomeLeader(node, 1)
+
+	const proposals = 16
+	start := make(chan struct{})
+	errCh := make(chan error, proposals)
+
+	var wg sync.WaitGroup
+	wg.Add(proposals)
+	for i := 0; i < proposals; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start
+			index, err := node.Propose(context.Background(), []byte(fmt.Sprintf("cmd-%d", i)))
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if index == 0 {
+				errCh <- fmt.Errorf("proposal index is zero")
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("propose: %v", err)
+		}
+	}
+
+	if maxBatch := storage.maxBatchSize(); maxBatch < 2 {
+		t.Fatalf("max append batch size = %d, want at least 2", maxBatch)
+	}
+
+	entries, err := storage.Entries(1, proposals+1)
+	if err != nil {
+		t.Fatalf("entries: %v", err)
+	}
+	if len(entries) != proposals {
+		t.Fatalf("entry count = %d, want %d", len(entries), proposals)
+	}
+}
+
+func TestReadIndexDoesNotWaitForProposalAppendFsync(t *testing.T) {
+	storage := newBlockingAppendStorage()
+	appendTerms(t, storage.memStorage, 1)
+
+	node, err := NewNode(Config{
+		ID:               "node1",
+		Peers:            []string{"node1"},
+		Storage:          storage,
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	defer node.Stop()
+
+	raftNode := becomeLeader(node, 1)
+	raftNode.commitIndex = 1
+	raftNode.commitTerm = 1
+	raftNode.lastApplied = 1
+	raftNode.matchIndex["node1"] = 1
+
+	storage.blockNextAppend()
+	proposeDone := make(chan error, 1)
+	go func() {
+		_, err := node.Propose(context.Background(), []byte("blocked"))
+		proposeDone <- err
+	}()
+	storage.waitBlocked(t, time.Second)
+
+	type readResult struct {
+		index uint64
+		err   error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		index, err := node.ReadIndex(context.Background())
+		readDone <- readResult{index: index, err: err}
+	}()
+
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		close(storage.release)
+	}
+	defer release()
+
+	select {
+	case result := <-readDone:
+		if result.err != nil {
+			t.Fatalf("read index: %v", result.err)
+		}
+		if result.index != 1 {
+			t.Fatalf("read index = %d, want 1", result.index)
+		}
+	case <-time.After(50 * time.Millisecond):
+		release()
+		t.Fatal("read index waited for proposal append storage write")
+	}
+
+	release()
+	if err := <-proposeDone; err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+}
+
+func TestReadIndexHeartbeatDoesNotWaitForFollowerAppendFsync(t *testing.T) {
+	storage := newBlockingAppendStorage()
+	appendTerms(t, storage.memStorage, 1)
+
+	node, err := NewNode(Config{
+		ID:               "node2",
+		Peers:            []string{"node1", "node2"},
+		Storage:          storage,
+		Transport:        NewFakeTransport(),
+		ElectionTimeout:  time.Second,
+		HeartbeatTimeout: 100 * time.Millisecond,
+		ApplyBufferSize:  16,
+	})
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	defer node.Stop()
+
+	handler := node.(RPCHandler)
+	storage.blockNextAppend()
+
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := handler.HandleAppendEntries(context.Background(), AppendEntriesRequest{
+			Term:         1,
+			LeaderID:     "node1",
+			PrevLogIndex: 1,
+			PrevLogTerm:  1,
+			Entries: []LogEntry{
+				{Index: 2, Term: 1, Type: EntryNormal, Data: []byte("blocked")},
+			},
+			LeaderCommit: 1,
+		})
+		appendDone <- err
+	}()
+	storage.waitBlocked(t, time.Second)
+
+	readDone := make(chan error, 1)
+	go func() {
+		resp, err := handler.HandleAppendEntries(context.Background(), AppendEntriesRequest{
+			Term:        1,
+			LeaderID:    "node1",
+			ReadContext: 99,
+		})
+		if err != nil {
+			readDone <- err
+			return
+		}
+		if !resp.Success || resp.ReadContext != 99 {
+			readDone <- fmt.Errorf("read heartbeat response = %+v", resp)
+			return
+		}
+		readDone <- nil
+	}()
+
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		close(storage.release)
+	}
+	defer release()
+
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+	case <-time.After(50 * time.Millisecond):
+		release()
+		t.Fatal("read heartbeat waited for follower append storage write")
+	}
+
+	release()
+	if err := <-appendDone; err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+}
+
 func TestReadIndexIsolated(t *testing.T) {
 	net := newNet()
 	nodes := newNodes(t, net, []string{"node1", "node2", "node3"})
@@ -427,6 +636,7 @@ func TestReadIndexWithLaggingFollowerUsesHeartbeatPath(t *testing.T) {
 	leaderNode.votedFor = leaderNode.id
 	leaderNode.leaderID = leaderNode.id
 	leaderNode.commitIndex = 3
+	leaderNode.commitTerm = 2
 	leaderNode.lastApplied = 3
 	leaderNode.nextIndex["node2"] = 4
 	leaderNode.matchIndex["node1"] = 3
@@ -443,6 +653,95 @@ func TestReadIndexWithLaggingFollowerUsesHeartbeatPath(t *testing.T) {
 	}
 	if index != 3 {
 		t.Fatalf("read index = %d, want 3", index)
+	}
+}
+
+func TestReadIndexCoalescesConcurrentConfirms(t *testing.T) {
+	storage := newMemStorage()
+	appendTerms(t, storage, 1)
+
+	transport := newBlockingReadTransport()
+	node := newTestNode(t, "node1", storage, transport)
+	defer node.Stop()
+
+	raftNode := becomeLeader(node, 1)
+	raftNode.commitIndex = 1
+	raftNode.commitTerm = 1
+	raftNode.lastApplied = 1
+	raftNode.matchIndex["node1"] = 1
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := node.ReadIndex(ctx)
+		errCh <- err
+	}()
+
+	transport.waitStarted(t, time.Second)
+
+	go func() {
+		_, err := node.ReadIndex(ctx)
+		errCh <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	transport.release()
+
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("read index error: %v", err)
+		}
+	}
+
+	if calls := transport.callCount(); calls != 1 {
+		t.Fatalf("read confirm append calls = %d, want 1", calls)
+	}
+}
+
+func TestReadIndexBatchWindowCoalescesBeforeConfirm(t *testing.T) {
+	previousWindow := readConfirmBatchWindow
+	readConfirmBatchWindow = 20 * time.Millisecond
+	defer func() {
+		readConfirmBatchWindow = previousWindow
+	}()
+
+	storage := newMemStorage()
+	appendTerms(t, storage, 1)
+
+	transport := &countingReadTransport{}
+	node := newTestNode(t, "node1", storage, transport)
+	defer node.Stop()
+
+	raftNode := becomeLeader(node, 1)
+	raftNode.commitIndex = 1
+	raftNode.commitTerm = 1
+	raftNode.lastApplied = 1
+	raftNode.matchIndex["node1"] = 1
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := node.ReadIndex(ctx)
+		errCh <- err
+	}()
+	time.Sleep(2 * time.Millisecond)
+	go func() {
+		_, err := node.ReadIndex(ctx)
+		errCh <- err
+	}()
+
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("read index error: %v", err)
+		}
+	}
+
+	if calls := transport.callCount(); calls != 1 {
+		t.Fatalf("read confirm append calls = %d, want 1", calls)
 	}
 }
 
@@ -743,7 +1042,7 @@ func TestStopClosesApplyChWithPendingSnapshot(t *testing.T) {
 	}
 }
 
-func TestSnapshotCommitPersistFailureDoesNotAdvanceState(t *testing.T) {
+func TestSnapshotCommitAdvanceDoesNotPersistHardState(t *testing.T) {
 	storage := &failCommitStorage{memStorage: newMemStorage()}
 	node, err := NewNode(Config{
 		ID:               "node1",
@@ -762,26 +1061,31 @@ func TestSnapshotCommitPersistFailureDoesNotAdvanceState(t *testing.T) {
 	raftNode.currentTerm = 1
 	storage.fail = true
 
-	_, err = raftNode.HandleInstallSnapshot(context.Background(), InstallSnapshotRequest{
+	resp, err := raftNode.HandleInstallSnapshot(context.Background(), InstallSnapshotRequest{
 		Term:              1,
 		LeaderID:          "node2",
 		LastIncludedIndex: 5,
 		LastIncludedTerm:  1,
 		Data:              []byte("snapshot"),
 	})
-	if !errors.Is(err, errInjectedHardState) {
-		t.Fatalf("install snapshot error = %v, want %v", err, errInjectedHardState)
+	if err != nil {
+		t.Fatalf("install snapshot: %v", err)
 	}
-	if raftNode.commitIndex != 0 {
-		t.Fatalf("commitIndex = %d, want 0", raftNode.commitIndex)
+	if resp.Term != 1 {
+		t.Fatalf("snapshot response term = %d, want 1", resp.Term)
 	}
-	if raftNode.lastApplied != 0 {
-		t.Fatalf("lastApplied = %d, want 0", raftNode.lastApplied)
+	if raftNode.commitIndex != 5 {
+		t.Fatalf("commitIndex = %d, want 5", raftNode.commitIndex)
 	}
-	if raftNode.restoreSnapshot.Index != 0 {
-		t.Fatalf("restoreSnapshot = %+v, want empty", raftNode.restoreSnapshot)
+	if raftNode.lastApplied != 5 {
+		t.Fatalf("lastApplied = %d, want 5", raftNode.lastApplied)
 	}
-	assertFatalStop(t, raftNode)
+	if raftNode.restoreSnapshot.Index != 5 {
+		t.Fatalf("restoreSnapshot = %+v, want index 5", raftNode.restoreSnapshot)
+	}
+	if raftNode.stopped {
+		t.Fatal("node stopped after commit-only hard state failure")
+	}
 }
 
 func waitLead(t *testing.T, nodes []Node, timeout time.Duration) string {
@@ -1351,6 +1655,100 @@ func (t *recordingTransport) entryBatchSizes() []int {
 	return append([]int(nil), t.batches...)
 }
 
+type blockingReadTransport struct {
+	mu        sync.Mutex
+	started   chan struct{}
+	releaseCh chan struct{}
+	calls     int
+}
+
+func newBlockingReadTransport() *blockingReadTransport {
+	return &blockingReadTransport{
+		started:   make(chan struct{}, 1),
+		releaseCh: make(chan struct{}),
+	}
+}
+
+func (t *blockingReadTransport) RequestVote(ctx context.Context, target string, req RequestVoteRequest) (RequestVoteResponse, error) {
+	return RequestVoteResponse{}, ErrNodeStopped
+}
+
+func (t *blockingReadTransport) AppendEntries(ctx context.Context, target string, req AppendEntriesRequest) (AppendEntriesResponse, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+
+	select {
+	case t.started <- struct{}{}:
+	default:
+	}
+
+	select {
+	case <-t.releaseCh:
+		return AppendEntriesResponse{
+			Term:        req.Term,
+			Success:     true,
+			ReadContext: req.ReadContext,
+		}, nil
+	case <-ctx.Done():
+		return AppendEntriesResponse{}, ctx.Err()
+	}
+}
+
+func (t *blockingReadTransport) InstallSnapshot(ctx context.Context, target string, req InstallSnapshotRequest) (InstallSnapshotResponse, error) {
+	return InstallSnapshotResponse{}, ErrNodeStopped
+}
+
+func (t *blockingReadTransport) waitStarted(tst *testing.T, timeout time.Duration) {
+	tst.Helper()
+
+	select {
+	case <-t.started:
+	case <-time.After(timeout):
+		tst.Fatal("timed out waiting for read confirm request")
+	}
+}
+
+func (t *blockingReadTransport) release() {
+	close(t.releaseCh)
+}
+
+func (t *blockingReadTransport) callCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+type countingReadTransport struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *countingReadTransport) RequestVote(ctx context.Context, target string, req RequestVoteRequest) (RequestVoteResponse, error) {
+	return RequestVoteResponse{}, ErrNodeStopped
+}
+
+func (t *countingReadTransport) AppendEntries(ctx context.Context, target string, req AppendEntriesRequest) (AppendEntriesResponse, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return AppendEntriesResponse{
+		Term:        req.Term,
+		Success:     true,
+		ReadContext: req.ReadContext,
+	}, nil
+}
+
+func (t *countingReadTransport) InstallSnapshot(ctx context.Context, target string, req InstallSnapshotRequest) (InstallSnapshotResponse, error) {
+	return InstallSnapshotResponse{}, ErrNodeStopped
+}
+
+func (t *countingReadTransport) callCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
 var errInjectedHardState = errors.New("injected hard state failure")
 
 type failingHardStateStorage struct {
@@ -1361,6 +1759,74 @@ type failingHardStateStorage struct {
 type failCommitStorage struct {
 	*memStorage
 	fail bool
+}
+
+type batchCountingStorage struct {
+	*memStorage
+	mu       sync.Mutex
+	maxBatch int
+}
+
+type blockingAppendStorage struct {
+	*memStorage
+	mu      sync.Mutex
+	block   bool
+	blocked chan struct{}
+	release chan struct{}
+}
+
+func newBlockingAppendStorage() *blockingAppendStorage {
+	return &blockingAppendStorage{
+		memStorage: newMemStorage(),
+		blocked:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
+func (s *batchCountingStorage) Append(entries []LogEntry) error {
+	s.mu.Lock()
+	if len(entries) > s.maxBatch {
+		s.maxBatch = len(entries)
+	}
+	s.mu.Unlock()
+	return s.memStorage.Append(entries)
+}
+
+func (s *batchCountingStorage) maxBatchSize() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxBatch
+}
+
+func (s *blockingAppendStorage) blockNextAppend() {
+	s.mu.Lock()
+	s.block = true
+	s.mu.Unlock()
+}
+
+func (s *blockingAppendStorage) Append(entries []LogEntry) error {
+	s.mu.Lock()
+	block := s.block
+	if block {
+		s.block = false
+	}
+	s.mu.Unlock()
+
+	if block {
+		close(s.blocked)
+		<-s.release
+	}
+	return s.memStorage.Append(entries)
+}
+
+func (s *blockingAppendStorage) waitBlocked(t *testing.T, timeout time.Duration) {
+	t.Helper()
+
+	select {
+	case <-s.blocked:
+	case <-time.After(timeout):
+		t.Fatal("append did not block before timeout")
+	}
 }
 
 func (s *failCommitStorage) SaveHardState(state HardState) error {

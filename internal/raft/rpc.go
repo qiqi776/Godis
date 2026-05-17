@@ -50,18 +50,21 @@ func (r *raftNode) HandleRequestVote(ctx context.Context, req RequestVoteRequest
 
 func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesRequest) (AppendEntriesResponse, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.stopped {
+		r.mu.Unlock()
 		return AppendEntriesResponse{}, r.nodeErrorLocked()
 	}
 	if req.Term < r.currentTerm {
+		term := r.currentTerm
+		r.mu.Unlock()
 		return AppendEntriesResponse{
-			Term:    r.currentTerm,
+			Term:    term,
 			Success: false,
 		}, nil
 	}
 	if req.Term > r.currentTerm {
 		if err := r.stepDownLocked(req.Term, ""); err != nil {
+			r.mu.Unlock()
 			return AppendEntriesResponse{}, err
 		}
 	}
@@ -69,23 +72,31 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 	r.state = Follower
 	r.leaderID = req.LeaderID
 	r.resetElectionTimer()
+	term := r.currentTerm
 
 	if req.ReadContext != 0 {
+		r.mu.Unlock()
 		return AppendEntriesResponse{
-			Term:        r.currentTerm,
+			Term:        term,
 			Success:     true,
 			ReadContext: req.ReadContext,
 		}, nil
 	}
 
+	r.logMu.Lock()
+
 	prevTerm, err := r.storage.Term(req.PrevLogIndex)
 	if err != nil {
 		conflictIndex, conflictTerm, conflictErr := r.appendConflictHintLocked(req.PrevLogIndex)
 		if conflictErr != nil {
+			r.logMu.Unlock()
+			r.mu.Unlock()
 			return AppendEntriesResponse{}, conflictErr
 		}
+		r.logMu.Unlock()
+		r.mu.Unlock()
 		return AppendEntriesResponse{
-			Term:          r.currentTerm,
+			Term:          term,
 			Success:       false,
 			ReadContext:   req.ReadContext,
 			ConflictIndex: conflictIndex,
@@ -95,10 +106,14 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 	if prevTerm != req.PrevLogTerm {
 		conflictIndex, conflictErr := r.firstIndexOfTermLocked(prevTerm, req.PrevLogIndex)
 		if conflictErr != nil {
+			r.logMu.Unlock()
+			r.mu.Unlock()
 			return AppendEntriesResponse{}, conflictErr
 		}
+		r.logMu.Unlock()
+		r.mu.Unlock()
 		return AppendEntriesResponse{
-			Term:          r.currentTerm,
+			Term:          term,
 			Success:       false,
 			ReadContext:   req.ReadContext,
 			ConflictIndex: conflictIndex,
@@ -106,27 +121,51 @@ func (r *raftNode) HandleAppendEntries(ctx context.Context, req AppendEntriesReq
 		}, nil
 	}
 
+	var lastIndex uint64
 	if len(req.Entries) > 0 {
+		r.mu.Unlock()
 		if err := r.appendEntries(req.Entries); err != nil {
+			r.logMu.Unlock()
 			return AppendEntriesResponse{}, err
 		}
-	}
+		lastIndex, err = r.storage.LastIndex()
+		r.logMu.Unlock()
+		if err != nil {
+			return AppendEntriesResponse{}, err
+		}
 
-	lastIndex, err := r.storage.LastIndex()
-	if err != nil {
-		return AppendEntriesResponse{}, err
+		r.mu.Lock()
+		if r.stopped {
+			r.mu.Unlock()
+			return AppendEntriesResponse{}, r.nodeErrorLocked()
+		}
+		if r.currentTerm != term {
+			currentTerm := r.currentTerm
+			r.mu.Unlock()
+			return AppendEntriesResponse{
+				Term:    currentTerm,
+				Success: false,
+			}, nil
+		}
+	} else {
+		lastIndex, err = r.storage.LastIndex()
+		r.logMu.Unlock()
+		if err != nil {
+			r.mu.Unlock()
+			return AppendEntriesResponse{}, err
+		}
 	}
 
 	if req.LeaderCommit > r.commitIndex {
 		nextCommit := min(req.LeaderCommit, lastIndex)
-		if err := r.updateCommitIndexLocked(nextCommit); err != nil {
-			return AppendEntriesResponse{}, err
-		}
+		r.updateCommitIndexLocked(nextCommit, 0)
 		r.notifyApply()
 	}
 
+	currentTerm := r.currentTerm
+	r.mu.Unlock()
 	return AppendEntriesResponse{
-		Term:        r.currentTerm,
+		Term:        currentTerm,
 		Success:     true,
 		ReadContext: req.ReadContext,
 	}, nil
@@ -163,14 +202,14 @@ func (r *raftNode) HandleInstallSnapshot(ctx context.Context, req InstallSnapsho
 		if req.LastIncludedIndex > nextCommit {
 			nextCommit = req.LastIncludedIndex
 		}
+		r.logMu.Lock()
 		if err := r.storage.ApplySnapshot(snapshot); err != nil {
+			r.logMu.Unlock()
 			r.mu.Unlock()
 			return InstallSnapshotResponse{}, err
 		}
-		if err := r.updateCommitIndexLocked(nextCommit); err != nil {
-			r.mu.Unlock()
-			return InstallSnapshotResponse{}, err
-		}
+		r.logMu.Unlock()
+		r.updateCommitIndexLocked(nextCommit, snapshot.Term)
 		r.lastApplied = req.LastIncludedIndex
 		r.restoreSnapshot = snapshot
 	}

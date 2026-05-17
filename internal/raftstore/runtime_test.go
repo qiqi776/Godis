@@ -3,9 +3,11 @@ package raftstore
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +16,56 @@ import (
 	"mini-kv/internal/raft"
 	"mini-kv/internal/raft/logstore"
 )
+
+func TestCommandCodecRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	command := kv.Command{
+		Type:      kv.CommandPut,
+		Key:       "key",
+		Value:     []byte("value"),
+		ClientID:  "client",
+		RequestID: 7,
+	}
+	data, err := EncodeCommand(command)
+	if err != nil {
+		t.Fatalf("encode command: %v", err)
+	}
+
+	decoded, err := DecodeCommand(data)
+	if err != nil {
+		t.Fatalf("decode command: %v", err)
+	}
+	if decoded.Type != command.Type || decoded.Key != command.Key || decoded.ClientID != command.ClientID || decoded.RequestID != command.RequestID || !bytes.Equal(decoded.Value, command.Value) {
+		t.Fatalf("decoded command = %+v, want %+v", decoded, command)
+	}
+}
+
+func TestDecodeCommandLegacyJSON(t *testing.T) {
+	t.Parallel()
+
+	command := kv.Command{
+		Type:      kv.CommandDelete,
+		Key:       "legacy-key",
+		ClientID:  "legacy-client",
+		RequestID: 11,
+	}
+	data, err := json.Marshal(commandEnvelope{
+		Version: commandVersion,
+		Command: command,
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy command: %v", err)
+	}
+
+	decoded, err := DecodeCommand(data)
+	if err != nil {
+		t.Fatalf("decode legacy command: %v", err)
+	}
+	if decoded.Type != command.Type || decoded.Key != command.Key || decoded.ClientID != command.ClientID || decoded.RequestID != command.RequestID || !bytes.Equal(decoded.Value, command.Value) {
+		t.Fatalf("decoded legacy command = %+v, want %+v", decoded, command)
+	}
+}
 
 type testNode struct {
 	id      string
@@ -27,6 +79,7 @@ type stubNode struct {
 	leader   bool
 	leaderID string
 	propose  func(context.Context, []byte) (uint64, error)
+	snapshot func(uint64, []byte) error
 }
 
 func (n *stubNode) Start() error { return nil }
@@ -42,7 +95,12 @@ func (n *stubNode) Propose(ctx context.Context, data []byte) (uint64, error) {
 
 func (n *stubNode) ReadIndex(context.Context) (uint64, error) { return 0, nil }
 
-func (n *stubNode) Snapshot(uint64, []byte) error { return nil }
+func (n *stubNode) Snapshot(index uint64, data []byte) error {
+	if n.snapshot == nil {
+		return nil
+	}
+	return n.snapshot(index, data)
+}
 
 func (n *stubNode) IsLeader() bool { return n.leader }
 
@@ -286,16 +344,51 @@ func TestApplySnap(t *testing.T) {
 	}
 }
 
-func TestDropUnwaited(t *testing.T) {
+func TestWaiterReturnsCompletedResult(t *testing.T) {
 	w := newWaiter()
 	w.notify(applyResult{Index: 7, Data: []byte("late")})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	_, err := w.wait(ctx, 7)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("wait error = %v, want %v", err, context.DeadlineExceeded)
+	result, err := w.wait(ctx, 7)
+	if err != nil {
+		t.Fatalf("wait completed result: %v", err)
+	}
+	if !bytes.Equal(result.Data, []byte("late")) {
+		t.Fatalf("completed data = %q, want late", result.Data)
+	}
+}
+
+func TestProposeDoesNotHoldWaiterLock(t *testing.T) {
+	store := mem.NewMemoryStore()
+	node := &stubNode{leader: true, leaderID: "node1"}
+	rt := New(store, node)
+
+	node.propose = func(ctx context.Context, data []byte) (uint64, error) {
+		if !rt.waiter.mu.TryLock() {
+			t.Fatal("waiter mutex is held during node propose")
+		}
+		rt.waiter.mu.Unlock()
+		go rt.applyMessage(raft.ApplyMsg{
+			Index: 1,
+			Term:  1,
+			Type:  raft.EntryNormal,
+			Data:  data,
+		})
+		return 1, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := rt.Propose(ctx, kv.Command{
+		Type:  kv.CommandPut,
+		Key:   "lock",
+		Value: []byte("value"),
+	})
+	if err != nil {
+		t.Fatalf("propose error: %v", err)
 	}
 }
 
@@ -332,6 +425,80 @@ func TestFastPropose(t *testing.T) {
 	value, ok, err := store.Get("fast")
 	if err != nil || !ok || !bytes.Equal(value, []byte("value")) {
 		t.Fatalf("store value = %q, ok=%v err=%v; want value, true, nil", value, ok, err)
+	}
+}
+
+func TestSnapshotRunsAsynchronously(t *testing.T) {
+	store := &blockingSnapshotStore{
+		MemoryStore: mem.NewMemoryStore(),
+		started:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	node := &stubNode{leader: true, leaderID: "node1"}
+
+	snapshotDone := make(chan snapshotResult, 1)
+	node.snapshot = func(index uint64, data []byte) error {
+		snapshotDone <- snapshotResult{
+			index: index,
+			data:  append([]byte(nil), data...),
+		}
+		return nil
+	}
+
+	rt := NewWithOptions(store, node, Options{SnapshotThreshold: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt.Start(ctx)
+
+	first, err := EncodeCommand(kv.Command{Type: kv.CommandPut, Key: "first", Value: []byte("one")})
+	if err != nil {
+		t.Fatalf("encode first: %v", err)
+	}
+	second, err := EncodeCommand(kv.Command{Type: kv.CommandPut, Key: "second", Value: []byte("two")})
+	if err != nil {
+		t.Fatalf("encode second: %v", err)
+	}
+
+	applyReturned := make(chan struct{})
+	go func() {
+		rt.applyMessage(raft.ApplyMsg{Index: 1, Term: 1, Type: raft.EntryNormal, Data: first})
+		close(applyReturned)
+	}()
+
+	select {
+	case <-applyReturned:
+	case <-time.After(time.Second):
+		t.Fatal("apply path blocked on snapshot marshal")
+	}
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot worker did not start")
+	}
+
+	rt.applyMessage(raft.ApplyMsg{Index: 2, Term: 1, Type: raft.EntryNormal, Data: second})
+	close(store.release)
+
+	var snapshot snapshotResult
+	select {
+	case snapshot = <-snapshotDone:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot did not finish")
+	}
+	if snapshot.index != 1 {
+		t.Fatalf("snapshot index = %d, want 1", snapshot.index)
+	}
+
+	restored := mem.NewMemoryStore()
+	if err := restored.Restore(snapshot.data); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	value, ok, err := restored.Get("first")
+	if err != nil || !ok || !bytes.Equal(value, []byte("one")) {
+		t.Fatalf("snapshot first = %q, ok=%v err=%v; want one, true, nil", value, ok, err)
+	}
+	if value, ok, err := restored.Get("second"); err != nil || ok {
+		t.Fatalf("snapshot second = %q, ok=%v err=%v; want missing", value, ok, err)
 	}
 }
 
@@ -619,4 +786,42 @@ func assertLeaderErr(t *testing.T, err error) {
 	if !errors.As(err, &notLeader) {
 		t.Fatalf("error = %v, want NotLeaderError", err)
 	}
+}
+
+type blockingSnapshotStore struct {
+	*mem.MemoryStore
+	started chan struct{}
+	release chan struct{}
+}
+
+type snapshotResult struct {
+	index uint64
+	data  []byte
+}
+
+func (s *blockingSnapshotStore) BeginSnapshot() (kv.SnapshotHandle, error) {
+	handle, err := s.MemoryStore.BeginSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	return &blockingSnapshotHandle{
+		SnapshotHandle: handle,
+		started:        s.started,
+		release:        s.release,
+	}, nil
+}
+
+type blockingSnapshotHandle struct {
+	kv.SnapshotHandle
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (h *blockingSnapshotHandle) Marshal() ([]byte, error) {
+	h.once.Do(func() {
+		close(h.started)
+	})
+	<-h.release
+	return h.SnapshotHandle.Marshal()
 }

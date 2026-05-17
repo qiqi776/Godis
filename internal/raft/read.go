@@ -12,7 +12,15 @@ type readConfirmResult struct {
 	readContext uint64
 }
 
+type readConfirmCall struct {
+	term uint64
+	done chan struct{}
+	err  error
+}
+
 var readContextSeq atomic.Uint64
+var readConfirmBatchWindow time.Duration
+var readConfirmWritePressureWindow = 500 * time.Microsecond
 
 func (r *raftNode) ReadIndex(ctx context.Context) (uint64, error) {
 	if ctx == nil {
@@ -69,45 +77,141 @@ func (r *raftNode) readState() (uint64, uint64, bool, error) {
 	}
 	index := r.commitIndex
 	term := r.currentTerm
+	commitTerm := r.commitTerm
 	r.mu.RUnlock()
 
 	if index == 0 {
 		return index, term, false, nil
 	}
-	commitTerm, err := r.storage.Term(index)
-	if err != nil {
-		return 0, 0, false, err
-	}
 	return index, term, commitTerm == term, nil
 }
 
 func (r *raftNode) confirm(ctx context.Context, term uint64) error {
-	r.mu.RLock()
-	if r.stopped {
-		err := r.nodeErrorLocked()
-		r.mu.RUnlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	peers, quorum, timeout, err := r.readConfirmState(term)
+	if err != nil {
 		return err
 	}
-	if r.state != Leader || r.currentTerm != term {
-		r.mu.RUnlock()
-		return ErrNotLeader
-	}
-
-	peers := append([]string(nil), r.peers...)
-	quorum := r.quorum
-	timeout := r.heartbeatTimeout
-	r.mu.RUnlock()
-
 	if quorum <= 1 {
 		return nil
 	}
 
+	return r.sharedReadConfirm(ctx, term, peers, quorum, timeout)
+}
+
+func (r *raftNode) readConfirmState(term uint64) ([]string, int, time.Duration, error) {
+	r.mu.RLock()
+	if r.stopped {
+		err := r.nodeErrorLocked()
+		r.mu.RUnlock()
+		return nil, 0, 0, err
+	}
+	if r.state != Leader || r.currentTerm != term {
+		r.mu.RUnlock()
+		return nil, 0, 0, ErrNotLeader
+	}
+
+	peers := r.peers
+	quorum := r.quorum
+	timeout := r.heartbeatTimeout
+	r.mu.RUnlock()
+	return peers, quorum, timeout, nil
+}
+
+func (r *raftNode) sharedReadConfirm(ctx context.Context, term uint64, peers []string, quorum int, timeout time.Duration) error {
+	r.readConfirmMu.Lock()
+	if call := r.readConfirm; call != nil && call.term == term {
+		select {
+		case <-call.done:
+		default:
+			r.readConfirmMu.Unlock()
+			return waitReadConfirm(ctx, call)
+		}
+	}
+
+	call := &readConfirmCall{
+		term: term,
+		done: make(chan struct{}),
+	}
+	r.readConfirm = call
+	r.readConfirmMu.Unlock()
+
+	go r.runReadConfirm(call, term, peers, quorum, timeout)
+	return waitReadConfirm(ctx, call)
+}
+
+func waitReadConfirm(ctx context.Context, call *readConfirmCall) error {
+	select {
+	case <-call.done:
+		return call.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *raftNode) runReadConfirm(call *readConfirmCall, term uint64, peers []string, quorum int, timeout time.Duration) {
+	if err := r.waitReadConfirmBatchWindow(); err != nil {
+		call.err = err
+	} else {
+		call.err = r.confirmQuorum(term, peers, quorum, timeout)
+	}
+	close(call.done)
+
+	r.readConfirmMu.Lock()
+	if r.readConfirm == call {
+		r.readConfirm = nil
+	}
+	r.readConfirmMu.Unlock()
+}
+
+func (r *raftNode) waitReadConfirmBatchWindow() error {
+	window := r.currentReadConfirmBatchWindow()
+	if window <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(window)
+	select {
+	case <-timer.C:
+		return nil
+	case <-r.stopCh:
+		stop(timer)
+		r.mu.RLock()
+		err := r.nodeErrorLocked()
+		r.mu.RUnlock()
+		return err
+	}
+}
+
+func (r *raftNode) currentReadConfirmBatchWindow() time.Duration {
+	if readConfirmBatchWindow > 0 {
+		return readConfirmBatchWindow
+	}
+
+	r.proposalMu.Lock()
+	active := r.proposalActive || len(r.proposalQueue) > 0
+	r.proposalMu.Unlock()
+	if active {
+		return readConfirmWritePressureWindow
+	}
+	return 0
+}
+
+func (r *raftNode) confirmQuorum(term uint64, peers []string, quorum int, timeout time.Duration) error {
 	readContext := readContextSeq.Add(1)
 	if readContext == 0 {
 		readContext = readContextSeq.Add(1)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	req, ok := r.buildReadIndexRequest(term, readContext)
+	if !ok {
+		return ErrNotLeader
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	results := make(chan readConfirmResult, len(peers)-1)
@@ -117,11 +221,6 @@ func (r *raftNode) confirm(ctx context.Context, term uint64) error {
 		}
 
 		go func(target string) {
-			req, ok := r.buildReadIndexRequest(term, readContext)
-			if !ok {
-				results <- readConfirmResult{}
-				return
-			}
 			resp, err := r.transport.AppendEntries(ctx, target, req)
 			if err != nil {
 				results <- readConfirmResult{}

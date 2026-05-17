@@ -176,6 +176,12 @@ fct_execute_this() {
     "${SCRIPT_DIR}/start.sh" "${profile}"
     mkdir -p "${result_dir}"
 
+    local pprof_pid=""
+    if (( pprof_seconds > 0 )); then
+        "${SCRIPT_DIR}/pprof.sh" "${profile}" "${result_dir}/pprof" "${pprof_seconds}" &
+        pprof_pid="$!"
+    fi
+
     if [[ -n "${matrix_file}" ]]; then
         fct_run_matrix "${matrix_file}" "${result_dir}" "$@"
     else
@@ -197,7 +203,11 @@ fct_execute_this() {
             "$@"
     fi
 
-    "${SCRIPT_DIR}/capture.sh" "${profile}" "${result_dir}/observability" "${pprof_seconds}"
+    if [[ -n "${pprof_pid}" ]]; then
+        wait "${pprof_pid}"
+    fi
+
+    "${SCRIPT_DIR}/capture.sh" "${profile}" "${result_dir}/observability" "0"
     fct_write_summary "${result_dir}"
 
     printf 'bench result written under %s\n' "${result_dir}"
