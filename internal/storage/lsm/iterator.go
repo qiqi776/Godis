@@ -181,11 +181,7 @@ func collectVisibleEntries(view *memView, readSeq uint64, bounds keyBounds) ([]e
 	// 从 latest 映射生成最终条目切片
 	entries := make([]entry, 0, len(latest))
 	for _, item := range latest {
-		// 若最终版本是 Delete，则该键应被视为不存在，丢弃
-		if item.Kind == record.KindDelete {
-			continue
-		}
-		if item.Kind != record.KindPut {
+		if item.Kind != record.KindPut && item.Kind != record.KindDelete {
 			return nil, fmt.Errorf("%w: unknown entry kind", ErrCorrupt)
 		}
 		entries = append(entries, item.Clone())

@@ -1,6 +1,9 @@
 package sstable
 
-import "bytes"
+import (
+	"bytes"
+	"sort"
+)
 
 // TableMeta 保存一个 SSTable 的元数据
 type TableMeta struct {
@@ -129,11 +132,19 @@ func (s *State) FilesForKey(key []byte) []TableMeta {
 			}
 			continue
 		}
+		levelFiles := make([]TableMeta, 0)
 		for _, meta := range metas {
 			if contains(meta, key) {
-				files = append(files, meta.Clone())
+				levelFiles = append(levelFiles, meta.Clone())
 			}
 		}
+		sort.Slice(levelFiles, func(i, j int) bool {
+			if levelFiles[i].MaxSeq != levelFiles[j].MaxSeq {
+				return levelFiles[i].MaxSeq > levelFiles[j].MaxSeq
+			}
+			return levelFiles[i].FileNum > levelFiles[j].FileNum
+		})
+		files = append(files, levelFiles...)
 	}
 	return files
 }

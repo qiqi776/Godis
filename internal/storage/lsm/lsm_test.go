@@ -265,6 +265,50 @@ func TestEngineWALRecoveryAfterUnflushedClose(t *testing.T) {
 	}
 }
 
+func TestEngineUnflushedDeleteHidesFlushedValue(t *testing.T) {
+	engine, err := Open(t.TempDir(), WithMemTableSize(1), WithL0CompactionTrigger(100))
+	if err != nil {
+		t.Fatalf("Open error = %v", err)
+	}
+	defer func() { _ = engine.Close() }()
+
+	var batch WriteBatch
+	batch.Put([]byte("a"), []byte("1"))
+	if err := engine.Write(&batch, WriteOptions{}); err != nil {
+		t.Fatalf("Write put error = %v", err)
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("Flush put error = %v", err)
+	}
+
+	batch.Reset()
+	batch.Delete([]byte("a"))
+	if err := engine.Write(&batch, WriteOptions{}); err != nil {
+		t.Fatalf("Write delete error = %v", err)
+	}
+
+	value, ok, err := engine.Get([]byte("a"))
+	if err != nil {
+		t.Fatalf("Get after unflushed delete error = %v", err)
+	}
+	if ok || value != nil {
+		t.Fatalf("Get(a) after unflushed delete = (%q, %v), want nil false", value, ok)
+	}
+
+	snapshot, err := engine.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot error = %v", err)
+	}
+	defer func() { _ = snapshot.Close() }()
+	value, ok, err = snapshot.Get([]byte("a"))
+	if err != nil {
+		t.Fatalf("snapshot Get after unflushed delete error = %v", err)
+	}
+	if ok || value != nil {
+		t.Fatalf("snapshot Get(a) after unflushed delete = (%q, %v), want nil false", value, ok)
+	}
+}
+
 func TestEngineCompactionKeepsLatestValue(t *testing.T) {
 	engine, err := Open(t.TempDir(), WithMemTableSize(1), WithL0CompactionTrigger(100))
 	if err != nil {
@@ -292,6 +336,63 @@ func TestEngineCompactionKeepsLatestValue(t *testing.T) {
 	}
 	if !ok || string(got) != "3" {
 		t.Fatalf("Get(a) after compaction = (%q, %v), want (3, true)", got, ok)
+	}
+}
+
+func TestEngineCompactionDeleteDoesNotResurrectLowerLevelValue(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir, WithMemTableSize(1), WithL0CompactionTrigger(100))
+	if err != nil {
+		t.Fatalf("Open error = %v", err)
+	}
+	defer func() { _ = engine.Close() }()
+
+	var batch WriteBatch
+	batch.Put([]byte("a"), []byte("1"))
+	if err := engine.Write(&batch, WriteOptions{}); err != nil {
+		t.Fatalf("Write initial value error = %v", err)
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("Flush initial value error = %v", err)
+	}
+	engine.opts.L0CompactionTrigger = 1
+	if err := engine.runCompaction(context.Background(), compactionJob{level: 0}); err != nil {
+		t.Fatalf("compact initial value error = %v", err)
+	}
+
+	batch.Reset()
+	batch.Delete([]byte("a"))
+	if err := engine.Write(&batch, WriteOptions{}); err != nil {
+		t.Fatalf("Write delete error = %v", err)
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatalf("Flush delete error = %v", err)
+	}
+	if err := engine.runCompaction(context.Background(), compactionJob{level: 0}); err != nil {
+		t.Fatalf("compact delete error = %v", err)
+	}
+
+	value, ok, err := engine.Get([]byte("a"))
+	if err != nil {
+		t.Fatalf("Get after delete compaction error = %v", err)
+	}
+	if ok || value != nil {
+		t.Fatalf("Get(a) after delete compaction = (%q, %v), want nil false", value, ok)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+
+	engine, err = Open(dir, WithMemTableSize(1), WithL0CompactionTrigger(100))
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	value, ok, err = engine.Get([]byte("a"))
+	if err != nil {
+		t.Fatalf("Get after reopen error = %v", err)
+	}
+	if ok || value != nil {
+		t.Fatalf("Get(a) after reopen = (%q, %v), want nil false", value, ok)
 	}
 }
 

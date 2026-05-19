@@ -1,6 +1,7 @@
 package lsm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -207,6 +208,11 @@ func (e *Engine) runCompaction(ctx context.Context, job compactionJob) error {
 	for i := range picked.Inputs {
 		inputs[i] = picked.Inputs[i].Clone()
 	}
+	if lower, upper, ok := tableKeyRange(inputs); ok {
+		for _, meta := range overlappingTables(state, job.level+1, lower, upper) {
+			inputs = append(inputs, meta)
+		}
+	}
 
 	// 读取所有输入文件的条目
 	entries := make([]entry, 0)
@@ -231,16 +237,17 @@ func (e *Engine) runCompaction(ctx context.Context, job compactionJob) error {
 	if err != nil {
 		return err
 	}
-	if len(merged) == 0 {
-		return nil
-	}
-
-	// 构建合并后的新 SSTable，放入下一层
-	fileNum := e.allocateFileNum()
 	outputLevel := job.level + 1
-	meta, err := e.tables.Build(ctx, fileNum, outputLevel, merged)
-	if err != nil {
-		return wrapSSTableCorrupt("build compaction output", err)
+	var added []tableMeta
+	var outputFileNum uint64
+	if len(merged) > 0 {
+		// 构建合并后的新 SSTable，放入下一层
+		outputFileNum = e.allocateFileNum()
+		meta, err := e.tables.Build(ctx, outputFileNum, outputLevel, merged)
+		if err != nil {
+			return wrapSSTableCorrupt("build compaction output", err)
+		}
+		added = []tableMeta{meta}
 	}
 
 	// 准备被删除的旧文件列表
@@ -251,15 +258,17 @@ func (e *Engine) runCompaction(ctx context.Context, job compactionJob) error {
 
 	edit := versionEdit{
 		NextFileNum: e.nextFileNum.Load(),
-		LastSeq:     maxSeq(merged),
-		Added:       []tableMeta{meta},
+		LastSeq:     maxSeq(entries),
+		Added:       added,
 		Deleted:     deleted,
 	}
 	if err := e.manifest.Apply(edit); err != nil {
 		// MANIFEST 写入失败，删除新生成的 SSTable
-		removeErr := e.tables.Remove(fileNum)
-		if removeErr != nil {
-			return errors.Join(fmt.Errorf("manifest apply compaction: %w", err), wrapSSTableCorrupt("remove uncommitted compaction output", removeErr))
+		if outputFileNum != 0 {
+			removeErr := e.tables.Remove(outputFileNum)
+			if removeErr != nil {
+				return errors.Join(fmt.Errorf("manifest apply compaction: %w", err), wrapSSTableCorrupt("remove uncommitted compaction output", removeErr))
+			}
 		}
 		return fmt.Errorf("manifest apply compaction: %w", err)
 	}
@@ -270,6 +279,40 @@ func (e *Engine) runCompaction(ctx context.Context, job compactionJob) error {
 		return err
 	}
 	return nil
+}
+
+func tableKeyRange(files []tableMeta) ([]byte, []byte, bool) {
+	if len(files) == 0 {
+		return nil, nil, false
+	}
+	lower := files[0].Smallest
+	upper := files[0].Largest
+	for _, meta := range files[1:] {
+		if bytes.Compare(meta.Smallest, lower) < 0 {
+			lower = meta.Smallest
+		}
+		if bytes.Compare(meta.Largest, upper) > 0 {
+			upper = meta.Largest
+		}
+	}
+	return append([]byte(nil), lower...), append([]byte(nil), upper...), true
+}
+
+func overlappingTables(state *versionState, level int, lower, upper []byte) []tableMeta {
+	if state == nil || level < 0 || level >= len(state.Levels) {
+		return nil
+	}
+	out := make([]tableMeta, 0)
+	for _, meta := range state.Levels[level] {
+		if bytes.Compare(meta.Largest, lower) < 0 {
+			continue
+		}
+		if bytes.Compare(meta.Smallest, upper) > 0 {
+			continue
+		}
+		out = append(out, meta.Clone())
+	}
+	return out
 }
 
 // removeTables 批量删除指定的 SSTable 文件，收集所有错误并合并返回。

@@ -11,68 +11,68 @@ import (
 	"mini-kv/internal/storage/lsm/record"
 )
 
-// Engine 是完整的 LSM 存储引擎实现。
+// Engine 是完整的 LSM 存储引擎实现
 type Engine struct {
-	dir  string      // 数据目录
-	opts Options     // 合并后的配置
-	deps components  // 依赖组件（工厂等）
+	dir  string         // 数据目录
+	opts Options        // 合并后的配置
+	deps components     // 依赖组件（工厂等）
 	lock *directoryLock // 目录文件锁，防止多实例冲突
 
-	writeMu sync.Mutex    // 写操作互斥锁，保证写入串行化
-	memMu   sync.RWMutex  // 内存表结构锁，保护 mem 与 imm 切片
+	writeMu sync.Mutex   // 写操作互斥锁，保证写入串行化
+	memMu   sync.RWMutex // 内存表结构锁，保护 mem 与 imm 切片
 
-	walFactory      walFactory       // WAL 工厂，可注入
-	memTableFactory memTableFactory  // MemTable 工厂
-	wal             walStore         // 当前 WAL 实例
-	mem             mutableMemTable  // 活跃内存表，接收写入
-	imm             []immutableMemTable // 不可变内存表队列，等待刷盘
-	tables          tableManager     // SSTable 管理器
-	manifest        manifestStore    // MANIFEST 持久化
-	clock           clock            // 时钟，便于测试
+	walFactory      walFactory              // WAL 工厂，可注入
+	memTableFactory memTableFactory         // MemTable 工厂
+	wal             walStore                // 当前 WAL 实例
+	mem             mutableMemTable         // 活跃内存表，接收写入
+	imm             []immutableMemTable     // 不可变内存表队列，等待刷盘
+	tables          tableManager            // SSTable 管理器
+	manifest        manifestStore           // MANIFEST 持久化
+	clock           clock                   // 时钟，便于测试
 	view            atomic.Pointer[memView] // 原子指针，指向最新的内存视图
-	lastSeq         atomic.Uint64    // 已分配的最大序列号
-	nextFileNum     atomic.Uint64    // 下一个可用的文件编号
-	versionMu       sync.RWMutex     // 版本状态锁
-	version         *versionState    // 当前文件版本状态
+	lastSeq         atomic.Uint64           // 已分配的最大序列号
+	nextFileNum     atomic.Uint64           // 下一个可用的文件编号
+	versionMu       sync.RWMutex            // 版本状态锁
+	version         *versionState           // 当前文件版本状态
 
-	lifecycleMu sync.RWMutex // 生命周期锁，控制关闭、后台错误等
-	isClosed    bool         // 是否已关闭
-	errMu       sync.RWMutex // 保护后台错误
-	fatalErr    error        // 后台致命错误，引擎不可用
-	doneCh      chan struct{} // 关闭通知通道
-	cancel      context.CancelFunc // 后台协程取消函数
-	wg          sync.WaitGroup // 后台协程等待
-	flushCh     chan flushRequest // 刷写请求通道，容量为1，非阻塞发送
+	lifecycleMu sync.RWMutex           // 生命周期锁，控制关闭、后台错误等
+	isClosed    bool                   // 是否已关闭
+	errMu       sync.RWMutex           // 保护后台错误
+	fatalErr    error                  // 后台致命错误，引擎不可用
+	doneCh      chan struct{}          // 关闭通知通道
+	cancel      context.CancelFunc     // 后台协程取消函数
+	wg          sync.WaitGroup         // 后台协程等待
+	flushCh     chan flushRequest      // 刷写请求通道，容量为1，非阻塞发送
 	compactCh   chan compactionRequest // 合并请求通道，容量为1
 }
 
-// memView 是内存表的快照视图，供读取使用。
+// memView 是内存表的快照视图，供读取使用
 type memView struct {
-	mutable   mutableMemTable    // 活跃内存表
+	mutable   mutableMemTable     // 活跃内存表
 	immutable []immutableMemTable // 不可变内存表列表
 }
 
-// Open 使用默认上下文打开引擎。
+// Open 使用默认上下文打开引擎
 func Open(dir string, opts ...Option) (*Engine, error) {
 	return OpenWithContext(context.TODO(), dir, opts...)
 }
 
-// OpenWithContext 带上下文打开引擎。
+// OpenWithContext 带上下文打开引擎
 func OpenWithContext(ctx context.Context, dir string, opts ...Option) (*Engine, error) {
 	return openWithComponentsContext(ctx, dir, components{}, opts...)
 }
 
-// openWithComponents 使用注入的组件（无上下文）。
+// openWithComponents 使用注入的组件（无上下文）
 func openWithComponents(dir string, deps components, opts ...Option) (*Engine, error) {
 	return openWithComponentsContext(context.TODO(), dir, deps, opts...)
 }
 
-// openWithComponentsContext 是真正的构造入口，接收上下文与组件。
+// openWithComponentsContext 是真正的构造入口，接收上下文与组件
 func openWithComponentsContext(ctx context.Context, dir string, deps components, opts ...Option) (*Engine, error) {
 	return newEngine(ctx, dir, deps, opts...)
 }
 
-// newEngine 初始化引擎并启动后台协程。
+// newEngine 初始化引擎并启动后台协程
 func newEngine(ctx context.Context, dir string, deps components, opts ...Option) (_ *Engine, retErr error) {
 	if ctx == nil {
 		ctx = context.TODO()
@@ -186,7 +186,7 @@ func newEngine(ctx context.Context, dir string, deps components, opts ...Option)
 	return engine, nil
 }
 
-// Get 根据键查询值，执行快照读。
+// Get 根据键查询值，执行快照读
 func (e *Engine) Get(key []byte) ([]byte, bool, error) {
 	e.lifecycleMu.RLock()
 	defer e.lifecycleMu.RUnlock()
@@ -197,18 +197,18 @@ func (e *Engine) Get(key []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 
-	readSeq := e.lastSeq.Load()       // 获取读取快照的序列号
-	view := e.loadView()              // 加载当前内存视图
+	readSeq := e.lastSeq.Load() // 获取读取快照的序列号
+	view := e.loadView()        // 加载当前内存视图
 	e.memMu.RLock()
-	value, ok, err := getFromView(view, key, readSeq) // 先在内存中查找
+	value, ok, matched, err := getFromView(view, key, readSeq) // 先在内存中查找
 	e.memMu.RUnlock()
-	if err != nil || ok {
+	if err != nil || matched {
 		return value, ok, err
 	}
 	return e.getFromTables(key, readSeq) // 未命中则查询 SSTable
 }
 
-// Write 将 WriteBatch 原子写入引擎。
+// Write 将 WriteBatch 原子写入引擎
 func (e *Engine) Write(writeBatch *WriteBatch, options WriteOptions) error {
 	if err := validateWriteBatch(writeBatch); err != nil {
 		return err
@@ -261,7 +261,7 @@ func (e *Engine) Write(writeBatch *WriteBatch, options WriteOptions) error {
 	return nil
 }
 
-// NewIterator 创建一个范围迭代器，返回可见的键值对。
+// NewIterator 创建一个范围迭代器，返回可见的键值对
 func (e *Engine) NewIterator(options IterOptions) *Iterator {
 	e.lifecycleMu.RLock()
 	defer e.lifecycleMu.RUnlock()
@@ -280,7 +280,7 @@ func (e *Engine) NewIterator(options IterOptions) *Iterator {
 	return newSliceIterator(entries, nil)
 }
 
-// Snapshot 创建引擎的一致性快照，可反复查询。
+// Snapshot 创建引擎的一致性快照，可反复查询
 func (e *Engine) Snapshot() (*Snapshot, error) {
 	e.lifecycleMu.RLock()
 	defer e.lifecycleMu.RUnlock()
@@ -299,12 +299,12 @@ func (e *Engine) Snapshot() (*Snapshot, error) {
 	return newSnapshot(entries), nil
 }
 
-// Flush 手动触发刷写（同步等待完成）。
+// Flush 手动触发刷写（同步等待完成）
 func (e *Engine) Flush() error {
 	return e.FlushWithContext(context.TODO())
 }
 
-// FlushWithContext 带上下文的刷写，可取消等待。
+// FlushWithContext 带上下文的刷写，可取消等待
 func (e *Engine) FlushWithContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.TODO()
@@ -381,7 +381,7 @@ func (e *Engine) Close() error {
 	return err
 }
 
-// closeOpenResources 在引擎打开失败时清理已初始化的资源，不等待后台协程（因为还未启动）。
+// closeOpenResources 在引擎打开失败时清理已初始化的资源，不等待后台协程（因为还未启动）
 func (e *Engine) closeOpenResources() error {
 	if e == nil {
 		return nil
@@ -406,14 +406,14 @@ func (e *Engine) closeOpenResources() error {
 	return err
 }
 
-// backgroundError 返回引擎后台任务中发生的致命错误（如果有），调用者应据此拒绝后续操作。
+// backgroundError 返回引擎后台任务中发生的致命错误（如果有），调用者应据此拒绝后续操作
 func (e *Engine) backgroundError() error {
 	e.errMu.RLock()
 	defer e.errMu.RUnlock()
 	return e.fatalErr
 }
 
-// setBackgroundError 记录后台致命错误，忽略 context 取消和引擎关闭，只记录第一个致命错误。
+// setBackgroundError 记录后台致命错误，忽略 context 取消和引擎关闭，只记录第一个致命错误
 func (e *Engine) setBackgroundError(err error) {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, ErrClosed) {
 		return
@@ -431,7 +431,7 @@ func (e *Engine) setBackgroundError(err error) {
 	e.fatalErr = fmt.Errorf("%w: %w", ErrBackground, err)
 }
 
-// loadView 以原子方式加载当前内存视图快照，若尚未发布则返回空视图。
+// loadView 以原子方式加载当前内存视图快照，若尚未发布则返回空视图
 func (e *Engine) loadView() *memView {
 	view := e.view.Load()
 	if view != nil {
@@ -440,7 +440,7 @@ func (e *Engine) loadView() *memView {
 	return &memView{}
 }
 
-// publishViewLocked 在持有 memMu 时更新原子内存视图，供读取路径使用。
+// publishViewLocked 在持有 memMu 时更新原子内存视图，供读取路径使用
 func (e *Engine) publishViewLocked() {
 	immutable := make([]immutableMemTable, len(e.imm))
 	copy(immutable, e.imm) // 复制一份不可变表切片，避免共享底层数组
@@ -450,8 +450,8 @@ func (e *Engine) publishViewLocked() {
 	})
 }
 
-// rotateMemTableLocked 检查是否需要冻结活跃 MemTable，若大小超过阈值且未超过最大不可变表数量则执行冻结。
-// 返回 true 表示发生了冻结（可能需要触发刷写）。
+// rotateMemTableLocked 检查是否需要冻结活跃 MemTable，若大小超过阈值且未超过最大不可变表数量则执行冻结
+// 返回 true 表示发生了冻结（可能需要触发刷写）
 func (e *Engine) rotateMemTableLocked() bool {
 	if e.mem == nil || e.mem.ApproximateSize() < e.opts.MemTableSize {
 		return false
@@ -465,34 +465,35 @@ func (e *Engine) rotateMemTableLocked() bool {
 	return true
 }
 
-// collectEntries 收集所有满足 readSeq 和 bounds 的可见条目，先收集内存视图，再收集 SSTable，最后合并。
-// 用于 Snapshot 和 NewIterator 构建一致性视图。
+// collectEntries 收集所有满足 readSeq 和 bounds 的可见条目，先收集内存视图，再收集 SSTable，最后合并
+// 用于 Snapshot 和 NewIterator 构建一致性视图
 func (e *Engine) collectEntries(bounds keyBounds) ([]entry, error) {
-	readSeq := e.lastSeq.Load()          // 确定快照序列号
-	view := e.loadView()                 // 内存视图
+	readSeq := e.lastSeq.Load() // 确定快照序列号
+	view := e.loadView()        // 内存视图
 	e.memMu.RLock()
 	defer e.memMu.RUnlock()
 	entries, err := collectVisibleEntries(view, readSeq, bounds) // 内存层可见条目
 	if err != nil {
 		return nil, err
 	}
-	tableEntries, err := e.collectTableEntries(readSeq, bounds)  // 磁盘层可见条目
+	tableEntries, err := e.collectTableEntries(readSeq, bounds) // 磁盘层可见条目
 	if err != nil {
 		return nil, err
 	}
-	return mergeVisibleEntries(entries, tableEntries)            // 合并两层的条目
+	return mergeVisibleEntries(entries, tableEntries) // 合并两层的条目
 }
 
-// getFromView 在内存视图中查找指定键的可见版本，返回原始值或 nil。
-// 遍历顺序：活跃 MemTable → 不可变 MemTable（从新到旧）。
-func getFromView(view *memView, key []byte, readSeq uint64) ([]byte, bool, error) {
+// getFromView 在内存视图中查找指定键的可见版本，返回原始值或 nil
+// 遍历顺序：活跃 MemTable → 不可变 MemTable（从新到旧）
+func getFromView(view *memView, key []byte, readSeq uint64) ([]byte, bool, bool, error) {
 	if view == nil {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	// 先查活跃表（最新写入）
 	if view.mutable != nil {
 		if entry, ok := view.mutable.Get(key, readSeq); ok {
-			return visibleValue(entry)
+			value, visible, err := visibleValue(entry)
+			return value, visible, true, err
 		}
 	}
 	// 再从新到旧查不可变表
@@ -501,14 +502,15 @@ func getFromView(view *memView, key []byte, readSeq uint64) ([]byte, bool, error
 			continue
 		}
 		if entry, ok := view.immutable[i].Get(key, readSeq); ok {
-			return visibleValue(entry)
+			value, visible, err := visibleValue(entry)
+			return value, visible, true, err
 		}
 	}
-	return nil, false, nil
+	return nil, false, false, nil
 }
 
-// visibleValue 根据 entry 的种类返回用户可见的值。
-// Put 返回实际值，Delete 返回不存在，未知类型返回错误。
+// visibleValue 根据 entry 的种类返回用户可见的值
+// Put 返回实际值，Delete 返回不存在，未知类型返回错误
 func visibleValue(entry entry) ([]byte, bool, error) {
 	switch entry.Kind {
 	case record.KindPut:
@@ -520,7 +522,7 @@ func visibleValue(entry entry) ([]byte, bool, error) {
 	}
 }
 
-// makeKeyBounds 将外部的 IterOptions 转换为内部使用的 keyBounds，克隆边界键以保证安全。
+// makeKeyBounds 将外部的 IterOptions 转换为内部使用的 keyBounds，克隆边界键以保证安全
 func makeKeyBounds(options IterOptions) keyBounds {
 	return keyBounds{
 		Lower: record.CloneBytes(options.LowerBound),
@@ -528,14 +530,14 @@ func makeKeyBounds(options IterOptions) keyBounds {
 	}
 }
 
-// currentVersion 返回当前版本状态的深拷贝，线程安全。
+// currentVersion 返回当前版本状态的深拷贝，线程安全
 func (e *Engine) currentVersion() *versionState {
 	e.versionMu.RLock()
 	defer e.versionMu.RUnlock()
 	return e.version.Clone()
 }
 
-// publishVersion 应用一次版本编辑并更新内存中的版本状态及下一个文件编号。
+// publishVersion 应用一次版本编辑并更新内存中的版本状态及下一个文件编号
 func (e *Engine) publishVersion(edit versionEdit) {
 	e.versionMu.Lock()
 	defer e.versionMu.Unlock()
@@ -543,13 +545,13 @@ func (e *Engine) publishVersion(edit versionEdit) {
 	e.nextFileNum.Store(e.version.NextFileNum)
 }
 
-// allocateFileNum 原子递增并返回下一个可用的 SSTable/WAL 文件编号。
+// allocateFileNum 原子递增并返回下一个可用的 SSTable/WAL 文件编号
 func (e *Engine) allocateFileNum() uint64 {
 	return e.nextFileNum.Add(1) - 1
 }
 
 // getFromTables 在 SSTable 层查找指定键，遍历可能包含该键的所有文件（由 FilesForKey 提供），
-// 找到第一个可见版本即返回。
+// 找到第一个可见版本即返回
 func (e *Engine) getFromTables(key []byte, readSeq uint64) ([]byte, bool, error) {
 	if e.tables == nil {
 		return nil, false, nil
@@ -575,7 +577,7 @@ func (e *Engine) getFromTables(key []byte, readSeq uint64) ([]byte, bool, error)
 	return nil, false, nil
 }
 
-// collectTableEntries 从所有 SSTable 中收集满足 readSeq 和 bounds 的可见条目，用于构建快照/迭代器。
+// collectTableEntries 从所有 SSTable 中收集满足 readSeq 和 bounds 的可见条目，用于构建快照/迭代器
 func (e *Engine) collectTableEntries(readSeq uint64, bounds keyBounds) ([]entry, error) {
 	if e.tables == nil {
 		return nil, nil
